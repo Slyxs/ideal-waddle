@@ -1,12 +1,12 @@
 {
-    "display_name": "Live2D TTS",
+    "display_name": "Live2D+",
     "loading_order": 1,
     "requires": [],
     "optional": [],
-    "js": "dist/index.js",
-    "css": "",
+    "js": "index.js",
+    "css": "style.css",
     "author": "ZephyrThePink",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "homePage": "",
     "auto_update": true
 }
