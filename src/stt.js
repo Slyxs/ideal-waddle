@@ -236,6 +236,87 @@ function normalizeWord(entry) {
     };
 }
 
+function normalizeResultMessage(message) {
+    const result = message?.result || {};
+    const words = Array.isArray(result.result)
+        ? result.result.map(normalizeWord).filter((entry) => entry.word)
+        : [];
+    const text = typeof result.text === 'string' ? result.text.trim() : '';
+    return { text, words };
+}
+
+function createApproximateAlignment(text, durationSeconds) {
+    const characters = Array.from(typeof text === 'string' ? text : '');
+    const duration = Number.isFinite(Number(durationSeconds)) && Number(durationSeconds) > 0
+        ? Number(durationSeconds)
+        : 0;
+
+    if (!characters.length) {
+        return {
+            characters: [],
+            character_start_times_seconds: [],
+            character_end_times_seconds: [],
+            approximate: true,
+            source: MODULE,
+        };
+    }
+
+    const characterDuration = duration > 0 ? duration / characters.length : 0;
+    return {
+        characters,
+        character_start_times_seconds: characters.map((_, index) => Number((index * characterDuration).toFixed(3))),
+        character_end_times_seconds: characters.map((_, index) => Number(((index + 1) * characterDuration).toFixed(3))),
+        approximate: true,
+        source: MODULE,
+    };
+}
+
+function createCharacterAlignmentFromWords(words, fallbackText, durationSeconds) {
+    const normalizedWords = Array.isArray(words)
+        ? words.map(normalizeWord).filter((entry) => entry.word)
+        : [];
+
+    if (!normalizedWords.length) {
+        return createApproximateAlignment(fallbackText, durationSeconds);
+    }
+
+    const characters = [];
+    const characterStartTimes = [];
+    const characterEndTimes = [];
+    let previousEnd = 0;
+
+    normalizedWords.forEach((entry, wordIndex) => {
+        const wordCharacters = Array.from(entry.word);
+        const safeStart = Math.max(0, entry.start);
+        const safeEnd = Math.max(safeStart, entry.end);
+        const wordDuration = safeEnd - safeStart;
+
+        if (wordIndex > 0) {
+            characters.push(' ');
+            characterStartTimes.push(Number(previousEnd.toFixed(3)));
+            characterEndTimes.push(Number(Math.max(previousEnd, safeStart).toFixed(3)));
+        }
+
+        wordCharacters.forEach((character, index) => {
+            const start = safeStart + (wordDuration * index) / Math.max(wordCharacters.length, 1);
+            const end = safeStart + (wordDuration * (index + 1)) / Math.max(wordCharacters.length, 1);
+            characters.push(character);
+            characterStartTimes.push(Number(start.toFixed(3)));
+            characterEndTimes.push(Number(end.toFixed(3)));
+        });
+
+        previousEnd = safeEnd;
+    });
+
+    return {
+        characters,
+        character_start_times_seconds: characterStartTimes,
+        character_end_times_seconds: characterEndTimes,
+        approximate: false,
+        source: MODULE,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Recognizer result collection
 //
@@ -246,6 +327,7 @@ function normalizeWord(entry) {
 
 function collectRecognizerResult(recognizer) {
     const resultMessages = [];
+    const partialResults = [];
     let resolveFn;
     let rejectFn;
     let timeoutId = 0;
@@ -263,7 +345,7 @@ function collectRecognizerResult(recognizer) {
     };
     const finish = () => {
         cleanup();
-        resolveFn(resultMessages);
+        resolveFn({ resultMessages, partialResults });
     };
     const fail = (error) => {
         cleanup();
@@ -277,6 +359,11 @@ function collectRecognizerResult(recognizer) {
     recognizer.on('result', (message) => {
         resultMessages.push(message);
         if (finalRequested) scheduleSettle();
+    });
+    recognizer.on('partialresult', (message) => {
+        // We don't use partial results for file transcription, but keep them
+        // for debugging in case word timestamps are missing.
+        partialResults.push(message);
     });
     recognizer.on('error', (message) => {
         fail(new Error(message?.error || 'Vosk recognizer returned an error.'));
@@ -326,25 +413,35 @@ async function transcribeBlob(blob) {
         }
 
         collector.requestFinal();
-        const resultMessages = await collector.promise;
+        const { resultMessages, partialResults } = await collector.promise;
 
-        const words = resultMessages
-            .flatMap((message) => (Array.isArray(message?.result?.result) ? message.result.result : []))
-            .map(normalizeWord)
-            .filter((entry) => entry.word);
-
-        const text = resultMessages
-            .map((message) => (typeof message?.result?.text === 'string' ? message.result.text.trim() : ''))
+        // Debug: if word timestamps are missing, log the raw Vosk messages so
+        // we can see what shape the model is actually returning.
+        const normalizedResults = resultMessages.map(normalizeResultMessage);
+        const words = normalizedResults.flatMap((result) => result.words);
+        const text = normalizedResults
+            .map((result) => result.text)
             .filter(Boolean)
             .join(' ')
             .replace(/\s+/g, ' ')
             .trim() || words.map((entry) => entry.word).join(' ');
 
+        const duration = Number(audioBuffer.duration) || 0;
+        const alignment = createCharacterAlignmentFromWords(words, text || '', duration);
+
+        if (!words.length && resultMessages.length) {
+            console.warn(`[${MODULE}] Vosk returned ${resultMessages.length} result segment(s) but no word timestamps. ` +
+                'Raw results logged below.');
+            console.log(`[${MODULE}] Raw Vosk result messages:`, resultMessages);
+            console.log(`[${MODULE}] Partial results:`, partialResults);
+        }
+
         return {
             text,
             words,
+            alignment,
             sampleRate: audioBuffer.sampleRate,
-            duration: Number(audioBuffer.duration) || 0,
+            duration,
         };
     } finally {
         try { recognizer.remove(); } catch { /* noop */ }
@@ -374,7 +471,7 @@ async function resolveAudioBlob(audio) {
     return null;
 }
 
-function logTimestamps(characterName, text, words, duration) {
+function logTimestamps(characterName, text, words, alignment, duration) {
     const label = characterName ? `"${characterName}"` : 'TTS';
     console.groupCollapsed(`[${MODULE}] ${label} — ${words.length} words (${duration.toFixed(2)}s)`);
     console.log('Text:', text);
@@ -386,9 +483,33 @@ function logTimestamps(characterName, text, words, duration) {
             conf: w.conf,
         })));
     } else {
-        console.warn('No word-level timestamps were produced.');
+        console.warn('No word-level timestamps were produced; using approximate alignment.');
     }
+    console.log('Alignment:', alignment);
     console.groupEnd();
+}
+
+// Event name used by Dustpan so external lip-sync consumers can pick this up.
+const TTS_DYNAMIC_TIMESTAMPS_READY_EVENT = 'TTSDynamicTimestampsReady';
+
+function dispatchTimestamps(characterName, text, words, alignment, duration) {
+    if (typeof window === 'undefined') return;
+    try {
+        window.dispatchEvent(new CustomEvent(TTS_DYNAMIC_TIMESTAMPS_READY_EVENT, {
+            detail: {
+                provider: MODULE,
+                characterName,
+                text,
+                words,
+                alignment,
+                normalizedAlignment: alignment,
+                approximate: alignment?.approximate === true,
+                duration,
+            },
+        }));
+    } catch (err) {
+        console.error(`[${MODULE}] Failed to dispatch timestamp event:`, err);
+    }
 }
 
 /**
@@ -434,7 +555,8 @@ export function setupSttPipeline({ isEnabled, getModelUrl } = {}) {
             }
 
             const result = await transcribeBlob(blob);
-            logTimestamps(characterName, result.text || text || '', result.words, result.duration);
+            logTimestamps(characterName, result.text || text || '', result.words, result.alignment, result.duration);
+            dispatchTimestamps(characterName, result.text || text || '', result.words, result.alignment, result.duration);
         } catch (error) {
             console.error(`[${MODULE}] Failed to transcribe TTS audio:`, error);
         }
