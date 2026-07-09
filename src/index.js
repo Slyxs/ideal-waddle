@@ -80,19 +80,17 @@ function setupTtsIntercept() {
     });
 }
 
-setupTtsIntercept();
-
 // ─────────────────────────────────────────────────────────────────────────────
 // React root
 // ─────────────────────────────────────────────────────────────────────────────
 
 function mountApp() {
     const rootContainer =
-        document.getElementById('extensions_settings') ||
+        document.getElementById('live2d_tts_container') ??
         document.getElementById('extensions_settings2');
 
     if (!rootContainer) {
-        console.error('[Live2D TTS] Could not find extensions_settings container – extension UI will not be shown.');
+        console.error('[Live2D TTS] Could not find extensions_settings2 container – extension UI will not be shown.');
         return;
     }
 
@@ -109,8 +107,10 @@ function mountApp() {
     );
 }
 
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', mountApp);
-} else {
+// Use jQuery document-ready (ST's expected extension init pattern) so that
+// ST globals (eventSource, eventTypes, etc.) are fully initialised before
+// the extension runs.
+jQuery(async () => {
+    setupTtsIntercept();
     mountApp();
-}
+});
