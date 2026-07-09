@@ -18,7 +18,7 @@ const LIVE2D_RUNTIME_SCRIPTS = [
     // pixi-live2d-display lipsync patch — PixiJS 7 compatible, supports Cubism 2 + 4
     'https://cdn.jsdelivr.net/npm/pixi-live2d-display-lipsyncpatch@0.5.0-ls-8/dist/index.min.js',
     // pixi-filters 6.x (browser UMD build, attaches to PIXI.filters)
-    'https://cdn.jsdelivr.net/npm/pixi-filters@6.1.5/dist/browser/pixi-filters.min.js',
+    'https://cdn.jsdelivr.net/npm/pixi-filters@6.1.5/dist/pixi-filters.min.js',
 ];
 
 const SCRIPT_ATTR = 'data-live2dplus-src';
