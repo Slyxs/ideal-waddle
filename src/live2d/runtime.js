@@ -1,24 +1,38 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Live2D runtime script loading
 //
-// Scripts are loaded once and cached.  The attribute used as a cache key is
-// scoped to this extension so it never collides with other loaders on the page.
+// Uses local copies of the libraries bundled inside the extension's lib/ folder.
+// The lipsyncpatch build of pixi-live2d-display is used instead of the default
+// one, matching the Dustpan project.
 //
-// CDN order matters: CubismCore must come before pixi-live2d-display, and
-// pixi.js must come before both.
+// Load order: TweenLite → live2d SDK2 → CubismCore → PIXI → lipsyncpatch display → filters
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SCRIPT_ATTR = 'data-live2d-tts-src';
 
-// To use local copies instead of CDN, place the files under
-//   SillyTavern/public/scripts/extensions/third-party/<folder>/lib/
-// and change these URLs to relative paths like /scripts/extensions/…/lib/pixi.min.js
-const RUNTIME_SCRIPTS = [
-    'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js',
-    'https://cdn.jsdelivr.net/npm/pixi.js@7/dist/pixi.min.js',
-    'https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js',
-    'https://cdn.jsdelivr.net/npm/pixi-filters@5/dist/pixi-filters.js',
-];
+// Detect the extension root path from the script tag ST injected.
+// ST sets the script src to /scripts/extensions/third-party/<folder>/dist/index.js
+// so we strip the trailing /dist/index.js portion.
+function detectExtensionBasePath() {
+    const candidates = document.querySelectorAll('script[src*="Extension-ReactTemplate"]');
+    if (candidates.length > 0) {
+        const m = candidates[0].src.match(/^(.*?\/Extension-ReactTemplate)/);
+        if (m) return m[1];
+    }
+    return '/scripts/extensions/third-party/Extension-ReactTemplate';
+}
+
+function getRuntimeScripts() {
+    const base = detectExtensionBasePath();
+    return [
+        `${base}/lib/TweenLite-1.20.2.js`,
+        `${base}/lib/live2d.min.js`,
+        `${base}/lib/live2dcubismcore.min.js`,
+        `${base}/lib/pixi-7.4.2.min.js`,
+        `${base}/lib/pixi-live2d-display-lipsyncpatch-0.5.0-ls-8.min.js`,
+        `${base}/lib/pixi-filters.min.js`,
+    ];
+}
 
 let runtimeLoadPromise = null;
 
@@ -59,7 +73,7 @@ function loadScriptOnce(src) {
 export async function loadLive2DRuntime() {
     if (!runtimeLoadPromise) {
         runtimeLoadPromise = (async () => {
-            for (const src of RUNTIME_SCRIPTS) {
+            for (const src of getRuntimeScripts()) {
                 await loadScriptOnce(src);
             }
         })();

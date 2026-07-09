@@ -86,16 +86,31 @@ setupTtsIntercept();
 // React root
 // ─────────────────────────────────────────────────────────────────────────────
 
-const rootContainer = document.getElementById('extensions_settings');
-const rootElement   = document.createElement('div');
-rootContainer.appendChild(rootElement);
+function mountApp() {
+    const rootContainer =
+        document.getElementById('extensions_settings') ||
+        document.getElementById('extensions_settings2');
 
-const root = ReactDOM.createRoot(rootElement);
-root.render(
-    <React.StrictMode>
-        <App
-            loadSettings={loadSettings}
-            saveSettings={saveSettings}
-        />
-    </React.StrictMode>,
-);
+    if (!rootContainer) {
+        console.error('[Live2D TTS] Could not find extensions_settings container – extension UI will not be shown.');
+        return;
+    }
+
+    const rootElement = document.createElement('div');
+    rootContainer.appendChild(rootElement);
+
+    ReactDOM.createRoot(rootElement).render(
+        <React.StrictMode>
+            <App
+                loadSettings={loadSettings}
+                saveSettings={saveSettings}
+            />
+        </React.StrictMode>,
+    );
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mountApp);
+} else {
+    mountApp();
+}
