@@ -40,28 +40,43 @@ function libBase() {
 // Script loading
 // ---------------------------------------------------------------------------
 
-function loadScript(src) {
-    if (typeof document === 'undefined') return Promise.resolve();
+async function loadScript(src) {
+    if (typeof document === 'undefined') return;
 
+    // Return early if already loaded
     const existing = document.querySelector(`script[${SCRIPT_ATTR}="${src}"]`);
     if (existing) {
-        if (existing.dataset.loaded === 'true') return Promise.resolve();
+        if (existing.dataset.loaded === 'true') return;
         return new Promise((resolve, reject) => {
             existing.addEventListener('load', resolve, { once: true });
             existing.addEventListener('error', () => reject(new Error(`Failed: ${src}`)), { once: true });
         });
     }
 
+    // Fetch the script text and wrap it in a blob with the correct JS MIME type.
+    // This bypasses servers that return text/plain with X-Content-Type-Options: nosniff,
+    // which would otherwise block the script from executing.
+    const response = await fetch(src);
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status} fetching ${src}`);
+    }
+    const code = await response.text();
+    const blob = new Blob([code], { type: 'application/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+
     return new Promise((resolve, reject) => {
         const el = document.createElement('script');
-        el.src = src;
-        el.async = false;
+        el.src = blobUrl;
         el.setAttribute(SCRIPT_ATTR, src);
         el.addEventListener('load', () => {
             el.dataset.loaded = 'true';
+            URL.revokeObjectURL(blobUrl);
             resolve();
         }, { once: true });
-        el.addEventListener('error', () => reject(new Error(`Failed to load: ${src}`)), { once: true });
+        el.addEventListener('error', () => {
+            URL.revokeObjectURL(blobUrl);
+            reject(new Error(`Failed to execute: ${src}`));
+        }, { once: true });
         document.head.appendChild(el);
     });
 }
