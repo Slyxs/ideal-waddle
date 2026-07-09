@@ -215,6 +215,31 @@ function mixAudioBufferToMono(audioBuffer) {
     return mono;
 }
 
+/**
+ * Resample decoded audio to 16 kHz mono using OfflineAudioContext.
+ * Vosk models are trained on 16 kHz audio; feeding other rates often
+ * transcribes fine but yields no word-level timestamps.
+ */
+async function resampleTo16kHzMono(audioBuffer) {
+    const targetSampleRate = 16000;
+    const targetLength = Math.max(1, Math.ceil(audioBuffer.duration * targetSampleRate));
+    const OfflineAudioContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OfflineAudioContext) {
+        throw new Error('OfflineAudioContext is not available for resampling.');
+    }
+    const offlineContext = new OfflineAudioContext(1, targetLength, targetSampleRate);
+    const source = offlineContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(offlineContext.destination);
+    source.start(0);
+    const rendered = await offlineContext.startRendering();
+    return {
+        sampleRate: targetSampleRate,
+        duration: audioBuffer.duration,
+        samples: Float32Array.from(rendered.getChannelData(0)),
+    };
+}
+
 function readChunkFrames(sampleRate) {
     return Math.max(1024, Math.round(sampleRate * CHUNK_SECONDS));
 }
@@ -238,10 +263,18 @@ function normalizeWord(entry) {
 
 function normalizeResultMessage(message) {
     const result = message?.result || {};
-    const words = Array.isArray(result.result)
-        ? result.result.map(normalizeWord).filter((entry) => entry.word)
-        : [];
-    const text = typeof result.text === 'string' ? result.text.trim() : '';
+    let rawWords = [];
+    if (Array.isArray(result.result)) {
+        rawWords = result.result;
+    } else if (Array.isArray(result.words)) {
+        rawWords = result.words;
+    } else if (Array.isArray(message?.result)) {
+        rawWords = message.result;
+    }
+    const words = rawWords.map(normalizeWord).filter((entry) => entry.word);
+    const text = typeof result.text === 'string'
+        ? result.text.trim()
+        : (typeof message?.text === 'string' ? message.text.trim() : '');
     return { text, words };
 }
 
@@ -398,16 +431,29 @@ async function transcribeBlob(blob) {
         throw new Error('Decoded audio is empty.');
     }
 
-    const recognizer = new loadedModel.KaldiRecognizer(audioBuffer.sampleRate);
-    recognizer.setWords(true);
+    // Vosk models are trained on 16 kHz mono. Transcription can work at other
+    // rates, but word timestamps are usually missing unless the audio is
+    // resampled to exactly 16 kHz before recognition.
+    const {
+        sampleRate: recognizerSampleRate,
+        duration,
+        samples: mono,
+    } = await resampleTo16kHzMono(audioBuffer);
+
+    const recognizer = new loadedModel.KaldiRecognizer(recognizerSampleRate);
+    if (typeof recognizer.setWords === 'function') {
+        recognizer.setWords(true);
+        console.log(`[${MODULE}] Recognizer created at ${recognizerSampleRate} Hz with word timestamps enabled.`);
+    } else {
+        console.warn(`[${MODULE}] Recognizer has no setWords() method; word timestamps will not be available.`);
+    }
 
     const collector = collectRecognizerResult(recognizer);
-    const mono = mixAudioBufferToMono(audioBuffer);
-    const chunkFrames = readChunkFrames(audioBuffer.sampleRate);
+    const chunkFrames = readChunkFrames(recognizerSampleRate);
 
     try {
         for (let offset = 0, chunk = 0; offset < mono.length; offset += chunkFrames, chunk += 1) {
-            recognizer.acceptWaveformFloat(mono.slice(offset, offset + chunkFrames), audioBuffer.sampleRate);
+            recognizer.acceptWaveformFloat(mono.slice(offset, offset + chunkFrames), recognizerSampleRate);
             // Yield periodically so we don't freeze the UI on long clips.
             if (chunk % 8 === 7) await yieldToBrowser();
         }
@@ -426,7 +472,6 @@ async function transcribeBlob(blob) {
             .replace(/\s+/g, ' ')
             .trim() || words.map((entry) => entry.word).join(' ');
 
-        const duration = Number(audioBuffer.duration) || 0;
         const alignment = createCharacterAlignmentFromWords(words, text || '', duration);
 
         if (!words.length && resultMessages.length) {
@@ -434,6 +479,8 @@ async function transcribeBlob(blob) {
                 'Raw results logged below.');
             console.log(`[${MODULE}] Raw Vosk result messages:`, resultMessages);
             console.log(`[${MODULE}] Partial results:`, partialResults);
+        } else if (words.length) {
+            console.log(`[${MODULE}] Produced ${words.length} word timestamp(s).`);
         }
 
         return {
