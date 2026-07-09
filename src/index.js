@@ -57,60 +57,48 @@ function isInterceptActive() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function setupTtsIntercept() {
-    const { eventSource, eventTypes } = SillyTavern.getContext();
+    try {
+        const { eventSource, eventTypes } = SillyTavern.getContext();
 
-    eventSource.on(eventTypes.TTS_AUDIO_READY, ({ audio, text, characterName }) => {
-        if (!isInterceptActive()) return;
+        eventSource.on(eventTypes.TTS_AUDIO_READY, ({ audio, text, characterName }) => {
+            if (!isInterceptActive()) return;
 
-        let url;
-        if (audio instanceof Blob) {
-            url = URL.createObjectURL(audio);
-        } else if (typeof audio === 'string') {
-            url = audio;
-        } else {
-            console.warn('[Live2D TTS] Unrecognised audio type:', typeof audio);
-            return;
-        }
+            let url;
+            if (audio instanceof Blob) {
+                url = URL.createObjectURL(audio);
+            } else if (typeof audio === 'string') {
+                url = audio;
+            } else {
+                console.warn('[Live2D TTS] Unrecognised audio type:', typeof audio);
+                return;
+            }
 
-        console.log('[Live2D TTS] Intercepted audio for "' + characterName + '"');
-        console.log('[Live2D TTS] Text:', text);
-        console.log('[Live2D TTS] Blob URL:', url);
-        // TODO: feed url + text to Vosk for timestamps, then drive lipsync
-        // Remember to call URL.revokeObjectURL(url) once done (Blob URLs only)
-    });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// React root
-// ─────────────────────────────────────────────────────────────────────────────
-
-function mountApp() {
-    const rootContainer =
-        document.getElementById('live2d_tts_container') ??
-        document.getElementById('extensions_settings2');
-
-    if (!rootContainer) {
-        console.error('[Live2D TTS] Could not find extensions_settings2 container – extension UI will not be shown.');
-        return;
+            console.log('[Live2D TTS] Intercepted audio for "' + characterName + '"');
+            console.log('[Live2D TTS] Text:', text);
+            console.log('[Live2D TTS] Blob URL:', url);
+            // TODO: feed url + text to Vosk for timestamps, then drive lipsync
+            // Remember to call URL.revokeObjectURL(url) once done (Blob URLs only)
+        });
+    } catch (e) {
+        console.warn('[Live2D TTS] Failed to set up TTS intercept:', e);
     }
-
-    const rootElement = document.createElement('div');
-    rootContainer.appendChild(rootElement);
-
-    ReactDOM.createRoot(rootElement).render(
-        <React.StrictMode>
-            <App
-                loadSettings={loadSettings}
-                saveSettings={saveSettings}
-            />
-        </React.StrictMode>,
-    );
 }
 
-// Use jQuery document-ready (ST's expected extension init pattern) so that
-// ST globals (eventSource, eventTypes, etc.) are fully initialised before
-// the extension runs.
-jQuery(async () => {
-    setupTtsIntercept();
-    mountApp();
-});
+setupTtsIntercept();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// React root  (matches the original template's mounting pattern)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const rootContainer = document.getElementById('extensions_settings');
+const rootElement = document.createElement('div');
+rootContainer.appendChild(rootElement);
+
+ReactDOM.createRoot(rootElement).render(
+    <React.StrictMode>
+        <App
+            loadSettings={loadSettings}
+            saveSettings={saveSettings}
+        />
+    </React.StrictMode>,
+);
