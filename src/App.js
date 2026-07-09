@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { normalizeSettings, resolveModelUrl, MODEL_SOURCES } from './settings';
+import { EXTENSION_WEB_PATH } from './stt';
 import { loadLive2DRuntime, buildFilters, applyModelTransform, applyModelInteraction } from './live2d';
 
 // ---------------------------------------------------------------------------
@@ -510,7 +511,7 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
                             <input
                                 type="text"
                                 className="text_pole"
-                                placeholder="/scripts/extensions/third-party/Extension-Live2D-Plus/models/…tar.gz"
+                                placeholder={`${EXTENSION_WEB_PATH}/models/…tar.gz`}
                                 value={s.voskModelUrl}
                                 onChange={(e) => set({ voskModelUrl: e.target.value })}
                                 style={{ width: '100%', marginBottom: '4px' }}
@@ -518,6 +519,9 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
                             <small style={{ opacity: 0.5 }}>
                                 Leave empty to use the bundled default model. Drop your own
                                 <code> .tar.gz </code> models in the extension's <code>models/</code> folder.
+                                The path must be one SillyTavern can serve (e.g.
+                                <code>/scripts/extensions/third-party/&lt;folder&gt;/models/…tar.gz</code>);
+                                local Android document paths are converted automatically when possible.
                             </small>
                         </div>
 

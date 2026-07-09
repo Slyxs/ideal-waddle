@@ -14,9 +14,40 @@ import * as Vosk from 'vosk-browser';
 
 const MODULE = 'Live2D+ STT';
 
+// ---------------------------------------------------------------------------
+// Extension path detection
+//
+// SillyTavern serves extensions at /scripts/extensions/third-party/<folder>/.
+// The folder name may differ from the repo name (e.g. the extension manager
+// installs under an ID like "ideal-waddle"). We detect it from the script tag
+// that loaded this bundle so the default model URL stays correct.
+// ---------------------------------------------------------------------------
+
+function detectExtensionFolder() {
+    try {
+        const current = document.currentScript;
+        if (current?.src) {
+            const match = current.src.match(/\/scripts\/extensions\/third-party\/([^/]+)(?:\/dist\/index\.js|$)/);
+            if (match) return match[1];
+        }
+
+        const scripts = document.querySelectorAll('script[src*="/scripts/extensions/third-party/"]');
+        for (const script of scripts) {
+            const match = script.src.match(/\/scripts\/extensions\/third-party\/([^/]+)(?:\/dist\/index\.js|$)/);
+            if (match) return match[1];
+        }
+    } catch {
+        /* noop — document may not exist in test environments */
+    }
+    return 'Extension-Live2D-Plus';
+}
+
+const EXTENSION_FOLDER = detectExtensionFolder();
+export const EXTENSION_WEB_PATH = `/scripts/extensions/third-party/${EXTENSION_FOLDER}`;
+
 // Served path of the bundled default model (see models/ folder + README).
 export const DEFAULT_VOSK_MODEL_URL =
-    '/scripts/extensions/third-party/Extension-Live2D-Plus/models/vosk-model-small-en-us-0.15.tar.gz';
+    `${EXTENSION_WEB_PATH}/models/vosk-model-small-en-us-0.15.tar.gz`;
 
 // Vosk internal log verbosity (-1 silences its own console spam).
 const VOSK_LOG_LEVEL = -1;
@@ -56,10 +87,49 @@ export function isSttModelReady() {
     return modelState.state === 'ready' && !!loadedModel;
 }
 
+/**
+ * Convert user-provided model locations into a fetchable SillyTavern URL.
+ * Handles empty input, Android document/content URIs, double-encoded paths,
+ * and local filesystem paths under SillyTavern's extensions folder.
+ * @param {string} modelUrl
+ */
 function normalizeModelUrl(modelUrl) {
-    return typeof modelUrl === 'string' && modelUrl.trim()
-        ? modelUrl.trim()
-        : DEFAULT_VOSK_MODEL_URL;
+    let url = typeof modelUrl === 'string' ? modelUrl.trim() : '';
+    if (!url) return DEFAULT_VOSK_MODEL_URL;
+
+    // Decode over-encoded URI components, e.g. %252F -> %2F -> /
+    while (url.includes('%25')) {
+        const decoded = decodeURIComponent(url);
+        if (decoded === url) break;
+        url = decoded;
+    }
+
+    // Strip Android Storage Access Framework wrappers.
+    if (url.startsWith('document://')) {
+        url = url.slice('document://'.length);
+    }
+    if (url.startsWith('content://')) {
+        // content://com.termux.documents/tree/<encoded-root>?<relative-path>
+        const match = url.match(/tree\/(.+?)(?:\?|$)(.*)/);
+        if (match) {
+            url = `/${match[1].replace(/^\/+/, '')}${match[2] || ''}`;
+        }
+    }
+
+    // If the user pasted a local filesystem path inside SillyTavern's
+    // extensions folder, convert it to the web-served path.
+    const localMatch = url.match(/\/extensions\/([^/]+)\/models\/([^/]+\.tar\.gz)$/i);
+    if (localMatch) {
+        return `/scripts/extensions/third-party/${localMatch[1]}/models/${localMatch[2]}`;
+    }
+
+    // Non-HTTP relative paths should be absolute so fetch() resolves them
+    // against the site origin instead of the current page.
+    if (!url.match(/^https?:\/\//i) && !url.startsWith('/')) {
+        url = `/${url}`;
+    }
+
+    return url;
 }
 
 /**
@@ -89,7 +159,10 @@ export async function loadSttModel(modelUrl) {
             console.log(`[${MODULE}] Vosk model loaded from ${url}`);
         } catch (error) {
             loadedModel = null;
-            const message = error?.message || 'Failed to load Vosk model.';
+            let message = error?.message || 'Failed to load Vosk model.';
+            if (message.toLowerCase().includes('fetch') || /^(document|content):/i.test(modelUrl)) {
+                message = `${message}. Make sure the URL is a path SillyTavern can serve, e.g. ${DEFAULT_VOSK_MODEL_URL}`;
+            }
             setModelState({ state: 'error', message, modelUrl: url });
             console.error(`[${MODULE}] Failed to load Vosk model from ${url}:`, error);
         } finally {
