@@ -2,57 +2,20 @@
 // Live2D runtime loading and model utilities
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Extension base URL detection
-// ---------------------------------------------------------------------------
+// Runtime scripts loaded from this extension's served folder.
+// SillyTavern mounts third-party extensions at /scripts/extensions/third-party/<folder>.
+const EXTENSION_WEB_PATH = '/scripts/extensions/third-party/Extension-Live2D+';
 
-/**
- * Derive the extension's root URL by finding this bundle's <script> tag.
- * Returns a URL ending with '/', e.g. '/scripts/extensions/third-party/Extension-Live2D+/'
- * Returns null if it cannot be determined.
- */
-function getExtensionBaseUrl() {
-    if (typeof document === 'undefined') return null;
-    const scripts = Array.from(document.scripts);
-    const thisScript = scripts.find(s => /\/dist\/index\.js/.test(s.src));
-    if (!thisScript) return null;
-    // Strip 'dist/index.js' (and any query string) to get the extension root
-    return thisScript.src.replace(/\/dist\/index\.js[^/]*$/, '/');
-}
+const LIVE2D_RUNTIME_FILES = [
+    'TweenLite-1.20.2.js',
+    'live2d.min.js',
+    'live2dcubismcore.min.js',
+    'pixi-7.4.2.min.js',
+    'pixi-live2d-display-lipsyncpatch-0.5.0-ls-8.min.js',
+    'pixi-filters.min.js',
+];
 
-// ---------------------------------------------------------------------------
-// Runtime script list
-// ---------------------------------------------------------------------------
-
-// CDN scripts loaded in dependency order.
-// Notes:
-//  - Cubism 4 core (live2dcubismcore.min.js) is loaded from the local lib/ folder.
-//    If the local file cannot be resolved, a CDN fallback is used.
-//  - PixiJS is capped at 7.x; pixi-live2d-display-lipsyncpatch is not compatible with 8.x.
-//  - pixi-filters must use the dist/browser/ build for correct UMD globals.
-const CUBISMCORE_CDN = 'https://cdn.jsdelivr.net/npm/live2dcubismcore@5.1.0/live2dcubismcore.min.js';
-
-function getRuntimeScripts() {
-    const base = getExtensionBaseUrl();
-    const cubismcore = base
-        ? `${base}lib/live2dcubismcore.min.js`
-        : CUBISMCORE_CDN;
-
-    return [
-        // Cubism 4 core — local first, CDN fallback handled at load time
-        cubismcore,
-        // GSAP 3 — provides TweenLite-equivalent functionality required by the Cubism 2 SDK
-        'https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js',
-        // Cubism 2.1 core
-        'https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js',
-        // PixiJS 7 (do NOT upgrade to 8.x)
-        'https://cdn.jsdelivr.net/npm/pixi.js@7.4.3/dist/pixi.min.js',
-        // pixi-live2d-display lipsync patch — PixiJS 7 compatible, supports Cubism 2 + 4
-        'https://cdn.jsdelivr.net/npm/pixi-live2d-display-lipsyncpatch@0.5.0-ls-8/dist/index.min.js',
-        // pixi-filters 6.x (browser UMD build, attaches to PIXI.filters)
-        'https://cdn.jsdelivr.net/npm/pixi-filters@6.1.5/dist/pixi-filters.min.js',
-    ];
-}
+const LIVE2D_RUNTIME_SCRIPTS = LIVE2D_RUNTIME_FILES.map((file) => `${EXTENSION_WEB_PATH}/lib/${file}`);
 
 const SCRIPT_ATTR = 'data-live2dplus-src';
 
@@ -91,21 +54,14 @@ let _runtimePromise = null;
 export async function loadLive2DRuntime() {
     if (!_runtimePromise) {
         _runtimePromise = (async () => {
-            const scripts = getRuntimeScripts();
-            for (let i = 0; i < scripts.length; i++) {
-                const src = scripts[i];
-                try {
-                    await loadScript(src);
-                } catch (err) {
-                    // If the local cubismcore fails, fall back to CDN
-                    if (i === 0 && src !== CUBISMCORE_CDN) {
-                        console.warn(`[Live2D+] Local cubismcore failed (${err.message}), falling back to CDN.`);
-                        await loadScript(CUBISMCORE_CDN);
-                    } else {
-                        throw err;
-                    }
-                }
+            for (const src of LIVE2D_RUNTIME_SCRIPTS) {
+                await loadScript(src);
             }
+
+            if (!window.Live2DCubismCore) {
+                throw new Error(`Cubism 4 core failed to load from ${EXTENSION_WEB_PATH}/lib/live2dcubismcore.min.js`);
+            }
+
             // Mute motion/expression audio (models can bundle sound clips in their motions).
             // We silence the sound manager globally so models don't play unexpected noises.
             // The lipsync speak() path uses its own audio element and is unaffected.
@@ -173,6 +129,34 @@ export function buildFilters(settings, PIXI) {
     }
 
     return filters;
+}
+
+// ---------------------------------------------------------------------------
+// Model interaction
+// ---------------------------------------------------------------------------
+
+export function applyModelInteraction(model, settings) {
+    if (!model) return;
+
+    const autoFocus = !!settings.followCursor;
+    const autoHitTest = !!settings.enableHitTesting;
+    const interactive = autoFocus || autoHitTest;
+
+    if (model.automator) {
+        model.automator.autoFocus = autoFocus;
+        model.automator.autoHitTest = autoHitTest;
+    } else {
+        if ('autoFocus' in model) model.autoFocus = autoFocus;
+        if ('autoHitTest' in model) model.autoHitTest = autoHitTest;
+        if ('autoInteract' in model) model.autoInteract = interactive;
+    }
+
+    model.eventMode = interactive ? 'static' : 'none';
+    model.interactive = interactive;
+
+    if (!autoFocus) {
+        model.internalModel?.focusController?.focus?.(0, 0, true);
+    }
 }
 
 // ---------------------------------------------------------------------------

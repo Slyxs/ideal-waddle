@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { normalizeSettings, resolveModelUrl, MODEL_SOURCES } from './settings';
-import { loadLive2DRuntime, buildFilters, applyModelTransform } from './live2d';
+import { loadLive2DRuntime, buildFilters, applyModelTransform, applyModelInteraction } from './live2d';
 
 // ---------------------------------------------------------------------------
 // Shared UI primitives
@@ -271,6 +271,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                     app.stage.addChild(model);
                     model.alpha = settings.opacity;
                     applyModelTransform(model, settings);
+                    applyModelInteraction(model, settings);
                     applyFilters(settings);
                     window.live2dPlusModel = model;
                     setStatus({ state: 'ready', message: 'Ready' });
@@ -293,12 +294,17 @@ function Live2DCanvas({ settings, onPositionCommit }) {
             destroyCurrent();
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [modelUrl, settings.reloadKey, settings.canvasWidth, settings.canvasHeight, settings.followCursor, settings.enableHitTesting]);
+    }, [modelUrl, settings.reloadKey, settings.canvasWidth, settings.canvasHeight]);
 
     // Transform effect
     useEffect(() => {
         applyModelTransform(modelRef.current, settings);
     }, [settings.scale, settings.modelPositionX, settings.modelPositionY, settings.canvasWidth, settings.canvasHeight]);
+
+    // Interaction effect
+    useEffect(() => {
+        applyModelInteraction(modelRef.current, settings);
+    }, [settings.followCursor, settings.enableHitTesting]);
 
     // Filters effect
     const filtersKey = JSON.stringify({ f: settings.filters, p: settings.filterParams });
