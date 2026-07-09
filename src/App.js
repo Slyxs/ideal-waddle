@@ -187,7 +187,7 @@ function MotionTestSection() {
 // ---------------------------------------------------------------------------
 
 function Live2DCanvas({ settings, onPositionCommit }) {
-    const canvasRef = useRef(null);
+    const containerRef = useRef(null);
     const appRef = useRef(null);
     const modelRef = useRef(null);
     const rendererRef = useRef(null);
@@ -215,8 +215,8 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     const modelUrl = resolveModelUrl(settings);
 
     useEffect(() => {
-        const canvas = canvasRef.current;
-        if (!canvas || !modelUrl) {
+        const container = containerRef.current;
+        if (!container || !modelUrl) {
             if (!modelUrl) setStatus({ state: 'error', message: 'No model URL configured.' });
             return;
         }
@@ -247,7 +247,6 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                 rendererRef.current = runtime;
 
                 const app = new PIXI.Application({
-                    view: canvas,
                     transparent: true,
                     backgroundAlpha: 0,
                     autoStart: true,
@@ -257,6 +256,18 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                 app.stage.eventMode = 'static';
                 app.stage.hitArea = app.screen;
                 appRef.current = app;
+
+                // PIXI owns its own canvas; we append it to a container div.
+                // This lets us fully destroy/recreate the canvas (and its WebGL
+                // context) on model reloads without touching React's DOM, and
+                // avoids leaking WebGL contexts on size changes (see resize effect).
+                const view = app.view;
+                view.style.display = 'block';
+                view.style.width = '100%';
+                view.style.height = '100%';
+                view.style.pointerEvents =
+                    settings.enableHitTesting || settings.followCursor ? 'auto' : 'none';
+                container.appendChild(view);
 
                 const model = Live2DModel.fromSync(modelUrl, {
                     autoFocus: !!settings.followCursor,
@@ -294,7 +305,20 @@ function Live2DCanvas({ settings, onPositionCommit }) {
             destroyCurrent();
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [modelUrl, settings.reloadKey, settings.canvasWidth, settings.canvasHeight]);
+    }, [modelUrl, settings.reloadKey]);
+
+    // Canvas resize effect — resize the renderer in place instead of
+    // destroying/recreating the whole PIXI app (which leaked WebGL contexts
+    // and eventually stopped rendering entirely).
+    useEffect(() => {
+        const app = appRef.current;
+        if (app?.renderer) {
+            app.renderer.resize(settings.canvasWidth, settings.canvasHeight);
+            app.stage.hitArea = app.screen;
+            applyModelTransform(modelRef.current, settings);
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [settings.canvasWidth, settings.canvasHeight]);
 
     // Transform effect
     useEffect(() => {
@@ -304,6 +328,11 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     // Interaction effect
     useEffect(() => {
         applyModelInteraction(modelRef.current, settings);
+        const view = appRef.current?.view;
+        if (view?.style) {
+            view.style.pointerEvents =
+                settings.enableHitTesting || settings.followCursor ? 'auto' : 'none';
+        }
     }, [settings.followCursor, settings.enableHitTesting]);
 
     // Filters effect
@@ -358,8 +387,6 @@ function Live2DCanvas({ settings, onPositionCommit }) {
         });
     }, [onPositionCommit]);
 
-    const canvasPointerEvents = settings.enableHitTesting || settings.followCursor ? 'auto' : 'none';
-
     const wrapperStyle = {
         position: 'fixed',
         left: `${pos.x}%`,
@@ -373,9 +400,9 @@ function Live2DCanvas({ settings, onPositionCommit }) {
 
     return (
         <div style={wrapperStyle} data-live2dplus-root="true">
-            <canvas
-                ref={canvasRef}
-                style={{ display: 'block', width: '100%', height: '100%', pointerEvents: canvasPointerEvents }}
+            <div
+                ref={containerRef}
+                style={{ display: 'block', width: '100%', height: '100%' }}
             />
 
             {status.state !== 'ready' && (
