@@ -453,8 +453,9 @@ function Live2DCanvas({ settings, onPositionCommit }) {
 // Main App
 // ---------------------------------------------------------------------------
 
-export default function App({ settings, onChange }) {
+export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
     const s = normalizeSettings(settings);
+    const sttModelState = sttModel || { state: 'idle', message: '' };
 
     const set = (patch) => onChange(patch);
 
@@ -519,6 +520,44 @@ export default function App({ settings, onChange }) {
                                 <code> .tar.gz </code> models in the extension's <code>models/</code> folder.
                             </small>
                         </div>
+
+                        <div
+                            className="menu_button"
+                            onClick={() => onLoadSttModel?.()}
+                            style={{
+                                marginTop: '8px',
+                                textAlign: 'center',
+                                opacity: sttModelState.state === 'loading' ? 0.6 : 1,
+                                pointerEvents: sttModelState.state === 'loading' ? 'none' : 'auto',
+                            }}
+                        >
+                            <i
+                                className={
+                                    sttModelState.state === 'loading'
+                                        ? 'fa-solid fa-spinner fa-spin'
+                                        : 'fa-solid fa-download'
+                                }
+                                style={{ marginRight: '6px' }}
+                            />
+                            {sttModelState.state === 'ready' ? 'Reload Vosk model' : 'Load Vosk model'}
+                        </div>
+                        {sttModelState.message && (
+                            <small
+                                style={{
+                                    display: 'block',
+                                    marginTop: '4px',
+                                    color: sttModelState.state === 'error' ? '#f87171'
+                                        : sttModelState.state === 'ready' ? '#4ade80' : 'inherit',
+                                    opacity: sttModelState.state === 'error' || sttModelState.state === 'ready' ? 1 : 0.6,
+                                    wordBreak: 'break-all',
+                                }}
+                            >
+                                {sttModelState.message}
+                            </small>
+                        )}
+                        <small style={{ opacity: 0.55, display: 'block', marginTop: '6px' }}>
+                            You must load a model before TTS audio can be transcribed.
+                        </small>
                     </SubDrawer>
 
                     {/* ── Model ── */}

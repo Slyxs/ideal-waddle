@@ -1,9 +1,15 @@
 /* global SillyTavern */
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { normalizeSettings, SETTINGS_KEY } from './settings';
-import { setupSttPipeline, DEFAULT_VOSK_MODEL_URL } from './stt';
+import {
+    setupSttPipeline,
+    loadSttModel,
+    getSttModelState,
+    subscribeSttModelState,
+    DEFAULT_VOSK_MODEL_URL,
+} from './stt';
 
 // ---------------------------------------------------------------------------
 // Initialize and mount the extension
@@ -28,9 +34,12 @@ import { setupSttPipeline, DEFAULT_VOSK_MODEL_URL } from './stt';
     // STT pipeline: intercepts TTS audio and logs Vosk word timestamps.
     // It reads live settings straight from ST's stored settings so it always
     // sees the latest toggle/model values.
+    const getModelUrl = () =>
+        extensionSettings[SETTINGS_KEY]?.voskModelUrl?.trim() || DEFAULT_VOSK_MODEL_URL;
+
     setupSttPipeline({
         isEnabled: () => extensionSettings[SETTINGS_KEY]?.sttEnabled === true,
-        getModelUrl: () => extensionSettings[SETTINGS_KEY]?.voskModelUrl?.trim() || DEFAULT_VOSK_MODEL_URL,
+        getModelUrl,
     });
 
     // Mount React into extensions_settings panel
@@ -47,6 +56,10 @@ import { setupSttPipeline, DEFAULT_VOSK_MODEL_URL } from './stt';
         const [settings, setSettings] = useState(() =>
             normalizeSettings(extensionSettings[SETTINGS_KEY])
         );
+        const [sttModel, setSttModel] = useState(() => getSttModelState());
+
+        // Keep the Vosk model load state in sync with the pipeline.
+        useEffect(() => subscribeSttModelState(setSttModel), []);
 
         function handleChange(patch) {
             setSettings((prev) => {
@@ -58,7 +71,14 @@ import { setupSttPipeline, DEFAULT_VOSK_MODEL_URL } from './stt';
             });
         }
 
-        return <App settings={settings} onChange={handleChange} />;
+        return (
+            <App
+                settings={settings}
+                onChange={handleChange}
+                sttModel={sttModel}
+                onLoadSttModel={() => loadSttModel(getModelUrl())}
+            />
+        );
     }
 
     const reactRoot = ReactDOM.createRoot(root);
