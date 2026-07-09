@@ -34,6 +34,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     followCursor: true,
     draggable: true,
     enableHitTesting: true,
+    sttEnabled: false,
+    voskModelUrl: '',
     modelSource: MODEL_SOURCES.DEFAULT,
     customModelUrl: '',
     localModelPath: '',
@@ -80,6 +82,8 @@ export function normalizeSettings(input = {}) {
         followCursor: bool(src.followCursor, DEFAULT_SETTINGS.followCursor),
         draggable: bool(src.draggable, DEFAULT_SETTINGS.draggable),
         enableHitTesting: bool(src.enableHitTesting, DEFAULT_SETTINGS.enableHitTesting),
+        sttEnabled: bool(src.sttEnabled, DEFAULT_SETTINGS.sttEnabled),
+        voskModelUrl: typeof src.voskModelUrl === 'string' ? src.voskModelUrl : '',
         modelSource: Object.values(MODEL_SOURCES).includes(src.modelSource)
             ? src.modelSource
             : DEFAULT_SETTINGS.modelSource,

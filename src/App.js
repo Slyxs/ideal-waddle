@@ -493,6 +493,34 @@ export default function App({ settings, onChange }) {
                     <CheckboxRow label="Enable Dragging" checked={s.draggable} onChange={(v) => set({ draggable: v })} />
                     <CheckboxRow label="Enable Hit Testing" checked={s.enableHitTesting} onChange={(v) => set({ enableHitTesting: v })} />
 
+                    {/* ── Speech-to-Text (lip-sync) ── */}
+                    <SubDrawer title="Speech-to-Text (Vosk)">
+                        <CheckboxRow
+                            label="Enable STT timestamps"
+                            checked={s.sttEnabled}
+                            onChange={(v) => set({ sttEnabled: v })}
+                        />
+                        <small style={{ opacity: 0.55, display: 'block', marginBottom: '6px' }}>
+                            Intercepts TTS audio, transcribes it with Vosk, and logs word-level
+                            timestamps to the browser console.
+                        </small>
+                        <div>
+                            <small style={{ display: 'block', marginBottom: '4px' }}>Vosk model URL</small>
+                            <input
+                                type="text"
+                                className="text_pole"
+                                placeholder="/scripts/extensions/third-party/Extension-Live2D-Plus/models/…tar.gz"
+                                value={s.voskModelUrl}
+                                onChange={(e) => set({ voskModelUrl: e.target.value })}
+                                style={{ width: '100%', marginBottom: '4px' }}
+                            />
+                            <small style={{ opacity: 0.5 }}>
+                                Leave empty to use the bundled default model. Drop your own
+                                <code> .tar.gz </code> models in the extension's <code>models/</code> folder.
+                            </small>
+                        </div>
+                    </SubDrawer>
+
                     {/* ── Model ── */}
                     <SubDrawer title="Model">
                         <div style={{ marginBottom: '6px' }}>
