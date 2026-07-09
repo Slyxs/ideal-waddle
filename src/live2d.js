@@ -5,7 +5,7 @@
 // Runtime scripts loaded from this extension's served folder.
 // SillyTavern mounts third-party extensions at /scripts/extensions/third-party/<folder>.
 const EXTENSION_FOLDER = 'Extension-Live2D+';
-const EXTENSION_WEB_PATH = `/scripts/extensions/third-party/${encodeURIComponent(EXTENSION_FOLDER)}`;
+const EXTENSION_WEB_PATH = `/scripts/extensions/third-party/${EXTENSION_FOLDER}`;
 
 const LIVE2D_RUNTIME_FILES = [
     'TweenLite-1.20.2.js',
@@ -47,6 +47,20 @@ function appendScript(src, key = src) {
     });
 }
 
+function summarizeResponse(source) {
+    return source.replace(/\s+/g, ' ').trim().slice(0, 180);
+}
+
+function isDefinitelyNotScript(source) {
+    const prefix = source.trim().slice(0, 160).toLowerCase();
+    return prefix.startsWith('<!doctype')
+        || prefix.startsWith('<html')
+        || prefix.startsWith('unauthorized')
+        || prefix.startsWith('forbidden')
+        || prefix.startsWith('not found')
+        || prefix.includes('cannot get');
+}
+
 async function loadScriptFromBlob(src) {
     const response = await fetch(src, { credentials: 'same-origin' });
     const contentType = response.headers.get('content-type') || 'unknown content type';
@@ -58,6 +72,9 @@ async function loadScriptFromBlob(src) {
     const source = await response.text();
     if (!source.trim()) {
         throw new Error(`Failed to load ${src}: response was empty (${contentType})`);
+    }
+    if (isDefinitelyNotScript(source)) {
+        throw new Error(`Failed to load ${src}: server returned ${contentType}: ${summarizeResponse(source)}`);
     }
 
     const blob = new Blob([`${source}\n//# sourceURL=${src}`], { type: 'text/javascript' });
@@ -87,16 +104,7 @@ async function loadScript(src) {
         }
     }
 
-    try {
-        await loadScriptFromBlob(src);
-    } catch (blobError) {
-        findScript(src)?.remove();
-        try {
-            await appendScript(src);
-        } catch (scriptError) {
-            throw new Error(`${blobError.message}; script tag fallback also failed: ${scriptError.message}`);
-        }
-    }
+    await loadScriptFromBlob(src);
 }
 
 let _runtimePromise = null;
