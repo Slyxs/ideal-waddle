@@ -4,7 +4,8 @@
 
 // Runtime scripts loaded from this extension's served folder.
 // SillyTavern mounts third-party extensions at /scripts/extensions/third-party/<folder>.
-const EXTENSION_WEB_PATH = '/scripts/extensions/third-party/Extension-Live2D+';
+const EXTENSION_FOLDER = 'Extension-Live2D+';
+const EXTENSION_WEB_PATH = `/scripts/extensions/third-party/${encodeURIComponent(EXTENSION_FOLDER)}`;
 
 const LIVE2D_RUNTIME_FILES = [
     'TweenLite-1.20.2.js',
@@ -23,30 +24,79 @@ const SCRIPT_ATTR = 'data-live2dplus-src';
 // Script loading
 // ---------------------------------------------------------------------------
 
-function loadScript(src) {
-    if (typeof document === 'undefined') return Promise.resolve();
+function findScript(src) {
+    return document.querySelector(`script[${SCRIPT_ATTR}="${src}"]`);
+}
 
-    const existing = document.querySelector(`script[${SCRIPT_ATTR}="${src}"]`);
-    if (existing) {
-        if (existing.dataset.loaded === 'true') return Promise.resolve();
-        return new Promise((resolve, reject) => {
-            existing.addEventListener('load', resolve, { once: true });
-            existing.addEventListener('error', () => reject(new Error(`Failed: ${src}`)), { once: true });
-        });
-    }
-
+function appendScript(src, key = src) {
     return new Promise((resolve, reject) => {
         const el = document.createElement('script');
         el.src = src;
         el.async = true;
-        el.setAttribute(SCRIPT_ATTR, src);
+        el.type = 'text/javascript';
+        el.setAttribute(SCRIPT_ATTR, key);
         el.addEventListener('load', () => {
             el.dataset.loaded = 'true';
             resolve();
         }, { once: true });
-        el.addEventListener('error', () => reject(new Error(`Failed to load: ${src}`)), { once: true });
+        el.addEventListener('error', () => {
+            el.dataset.failed = 'true';
+            reject(new Error(`Failed to load: ${key}`));
+        }, { once: true });
         document.head.appendChild(el);
     });
+}
+
+async function loadScriptFromBlob(src) {
+    const response = await fetch(src, { credentials: 'same-origin' });
+    const contentType = response.headers.get('content-type') || 'unknown content type';
+
+    if (!response.ok) {
+        throw new Error(`Failed to fetch ${src}: HTTP ${response.status} ${response.statusText || ''} (${contentType})`.trim());
+    }
+
+    const source = await response.text();
+    if (!source.trim()) {
+        throw new Error(`Failed to load ${src}: response was empty (${contentType})`);
+    }
+
+    const blob = new Blob([`${source}\n//# sourceURL=${src}`], { type: 'text/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+
+    try {
+        await appendScript(blobUrl, src);
+    } catch (blobError) {
+        throw new Error(`Failed to execute ${src} from Blob: ${blobError.message}`);
+    } finally {
+        URL.revokeObjectURL(blobUrl);
+    }
+}
+
+async function loadScript(src) {
+    if (typeof document === 'undefined') return Promise.resolve();
+
+    const existing = findScript(src);
+    if (existing) {
+        if (existing.dataset.loaded === 'true') return Promise.resolve();
+        if (existing.dataset.failed === 'true') existing.remove();
+        else {
+            return new Promise((resolve, reject) => {
+                existing.addEventListener('load', resolve, { once: true });
+                existing.addEventListener('error', () => reject(new Error(`Failed: ${src}`)), { once: true });
+            });
+        }
+    }
+
+    try {
+        await loadScriptFromBlob(src);
+    } catch (blobError) {
+        findScript(src)?.remove();
+        try {
+            await appendScript(src);
+        } catch (scriptError) {
+            throw new Error(`${blobError.message}; script tag fallback also failed: ${scriptError.message}`);
+        }
+    }
 }
 
 let _runtimePromise = null;
