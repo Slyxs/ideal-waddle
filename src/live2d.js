@@ -2,81 +2,50 @@
 // Live2D runtime loading and model utilities
 // ---------------------------------------------------------------------------
 
-const EXTENSION_LIBS = [
-    'TweenLite-1.20.2.js',
-    'live2d.min.js',
-    'live2dcubismcore.min.js',
-    'pixi-7.4.2.min.js',
-    'pixi-live2d-display-lipsyncpatch-0.5.0-ls-8.min.js',
-    'pixi-filters.min.js',
+// CDN-hosted scripts — loaded in order (each script may depend on the prior)
+const LIVE2D_CDN_SCRIPTS = [
+    // GSAP TweenLite — required by the Cubism 2 SDK
+    'https://cdnjs.cloudflare.com/ajax/libs/gsap/1.20.2/TweenLite.min.js',
+    // Live2D Cubism 2 SDK (.moc models)
+    'https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js',
+    // Live2D Cubism 4 Core (.moc3 models)
+    'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js',
+    // PixiJS v7
+    'https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js',
+    // pixi-live2d-display — attaches as PIXI.live2d, must load after PIXI
+    'https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.5.0/dist/index.min.js',
+    // PIXI filters (Outline, Pixelate, CRT, etc.)
+    'https://cdn.jsdelivr.net/npm/pixi-filters@5.0.0/dist/pixi-filters.min.js',
 ];
 
 const SCRIPT_ATTR = 'data-live2dplus-src';
 
 // ---------------------------------------------------------------------------
-// Resolve the extension's lib directory URL at runtime
-// ---------------------------------------------------------------------------
-
-function getExtensionLibBase() {
-    if (typeof document === 'undefined') {
-        return '/scripts/extensions/third-party/Extension-Live2D+/lib';
-    }
-    const scripts = Array.from(document.querySelectorAll('script[src]'));
-    for (const script of scripts) {
-        if (script.src.includes('Extension-Live2D+')) {
-            return script.src.replace(/\/dist\/[^/]+(\?.*)?$/, '/lib');
-        }
-    }
-    return '/scripts/extensions/third-party/Extension-Live2D+/lib';
-}
-
-let _libBase = null;
-function libBase() {
-    if (!_libBase) _libBase = getExtensionLibBase();
-    return _libBase;
-}
-
-// ---------------------------------------------------------------------------
 // Script loading
 // ---------------------------------------------------------------------------
 
-async function loadScript(src) {
-    if (typeof document === 'undefined') return;
+function loadScript(src) {
+    if (typeof document === 'undefined') return Promise.resolve();
 
-    // Return early if already loaded
     const existing = document.querySelector(`script[${SCRIPT_ATTR}="${src}"]`);
     if (existing) {
-        if (existing.dataset.loaded === 'true') return;
+        if (existing.dataset.loaded === 'true') return Promise.resolve();
         return new Promise((resolve, reject) => {
             existing.addEventListener('load', resolve, { once: true });
             existing.addEventListener('error', () => reject(new Error(`Failed: ${src}`)), { once: true });
         });
     }
 
-    // Fetch the script text and wrap it in a blob with the correct JS MIME type.
-    // This bypasses servers that return text/plain with X-Content-Type-Options: nosniff,
-    // which would otherwise block the script from executing.
-    const response = await fetch(src);
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status} fetching ${src}`);
-    }
-    const code = await response.text();
-    const blob = new Blob([code], { type: 'application/javascript' });
-    const blobUrl = URL.createObjectURL(blob);
-
     return new Promise((resolve, reject) => {
         const el = document.createElement('script');
-        el.src = blobUrl;
+        el.src = src;
+        el.async = false;
         el.setAttribute(SCRIPT_ATTR, src);
         el.addEventListener('load', () => {
             el.dataset.loaded = 'true';
-            URL.revokeObjectURL(blobUrl);
             resolve();
         }, { once: true });
-        el.addEventListener('error', () => {
-            URL.revokeObjectURL(blobUrl);
-            reject(new Error(`Failed to execute: ${src}`));
-        }, { once: true });
+        el.addEventListener('error', () => reject(new Error(`Failed to load: ${src}`)), { once: true });
         document.head.appendChild(el);
     });
 }
@@ -86,9 +55,8 @@ let _runtimePromise = null;
 export async function loadLive2DRuntime() {
     if (!_runtimePromise) {
         _runtimePromise = (async () => {
-            const base = libBase();
-            for (const lib of EXTENSION_LIBS) {
-                await loadScript(`${base}/${lib}`);
+            for (const src of LIVE2D_CDN_SCRIPTS) {
+                await loadScript(src);
             }
         })();
     }
