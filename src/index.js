@@ -1,104 +1,57 @@
 /* global SillyTavern */
-import React from 'react';
+import React, { useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
-import { normalizeSettings, defaultSettings } from './live2d/settings';
+import { normalizeSettings, SETTINGS_KEY } from './settings';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Settings persistence via ST's extension_settings
-// ─────────────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Initialize and mount the extension
+// ---------------------------------------------------------------------------
 
-const SETTINGS_KEY = 'live2d_tts';
-
-function loadSettings() {
-    const ctx = SillyTavern.getContext();
-    if (!ctx.extension_settings[SETTINGS_KEY]) {
-        ctx.extension_settings[SETTINGS_KEY] = { ...defaultSettings };
+(function init() {
+    const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null;
+    if (!ctx) {
+        console.error('[Live2D+] SillyTavern context not available.');
+        return;
     }
-    return ctx.extension_settings[SETTINGS_KEY];
-}
 
-function saveSettings(settings) {
-    const ctx = SillyTavern.getContext();
-    ctx.extension_settings[SETTINGS_KEY] = settings;
-    ctx.saveSettingsDebounced?.();
-}
+    const { extensionSettings, saveSettingsDebounced } = ctx;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HTMLAudioElement.prototype.play patch
-//
-// When Live2D is enabled we block ST's tts_audio playback so we can feed the
-// audio to the Live2D lipsync layer instead.  A synthetic 'ended' event is
-// dispatched so ST's internal audio queue keeps moving.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const _originalPlay = HTMLAudioElement.prototype.play;
-
-HTMLAudioElement.prototype.play = function () {
-    if (this.id === 'tts_audio' && isInterceptActive()) {
-        const el = this;
-        Promise.resolve().then(() => el.dispatchEvent(new Event('ended')));
-        return Promise.resolve();
+    // Initialize settings namespace
+    if (!extensionSettings[SETTINGS_KEY]) {
+        extensionSettings[SETTINGS_KEY] = {};
     }
-    return _originalPlay.apply(this, arguments);
-};
+    // Ensure all fields are present and valid
+    extensionSettings[SETTINGS_KEY] = normalizeSettings(extensionSettings[SETTINGS_KEY]);
 
-function isInterceptActive() {
-    try {
-        const settings = normalizeSettings(SillyTavern.getContext().extension_settings[SETTINGS_KEY]);
-        return settings.enabled;
-    } catch {
-        return false;
+    // Mount React into extensions_settings panel
+    const container = document.getElementById('extensions_settings');
+    if (!container) {
+        console.error('[Live2D+] #extensions_settings not found.');
+        return;
     }
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TTS_AUDIO_READY listener
-// ─────────────────────────────────────────────────────────────────────────────
+    const root = document.createElement('div');
+    container.appendChild(root);
 
-function setupTtsIntercept() {
-    try {
-        const { eventSource, eventTypes } = SillyTavern.getContext();
+    function Root() {
+        const [settings, setSettings] = useState(() =>
+            normalizeSettings(extensionSettings[SETTINGS_KEY])
+        );
 
-        eventSource.on(eventTypes.TTS_AUDIO_READY, ({ audio, text, characterName }) => {
-            if (!isInterceptActive()) return;
+        function handleChange(patch) {
+            setSettings((prev) => {
+                const next = normalizeSettings({ ...prev, ...patch });
+                // Persist to ST's extension settings
+                Object.assign(extensionSettings[SETTINGS_KEY], next);
+                saveSettingsDebounced();
+                return next;
+            });
+        }
 
-            let url;
-            if (audio instanceof Blob) {
-                url = URL.createObjectURL(audio);
-            } else if (typeof audio === 'string') {
-                url = audio;
-            } else {
-                console.warn('[Live2D TTS] Unrecognised audio type:', typeof audio);
-                return;
-            }
-
-            console.log('[Live2D TTS] Intercepted audio for "' + characterName + '"');
-            console.log('[Live2D TTS] Text:', text);
-            console.log('[Live2D TTS] Blob URL:', url);
-            // TODO: feed url + text to Vosk for timestamps, then drive lipsync
-            // Remember to call URL.revokeObjectURL(url) once done (Blob URLs only)
-        });
-    } catch (e) {
-        console.warn('[Live2D TTS] Failed to set up TTS intercept:', e);
+        return <App settings={settings} onChange={handleChange} />;
     }
-}
 
-setupTtsIntercept();
-
-// ─────────────────────────────────────────────────────────────────────────────
-// React root  (matches the original template's mounting pattern)
-// ─────────────────────────────────────────────────────────────────────────────
-
-const rootContainer = document.getElementById('extensions_settings');
-const rootElement = document.createElement('div');
-rootContainer.appendChild(rootElement);
-
-ReactDOM.createRoot(rootElement).render(
-    <React.StrictMode>
-        <App
-            loadSettings={loadSettings}
-            saveSettings={saveSettings}
-        />
-    </React.StrictMode>,
-);
+    const reactRoot = ReactDOM.createRoot(root);
+    reactRoot.render(<Root />);
+})();
