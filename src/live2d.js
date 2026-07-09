@@ -2,20 +2,18 @@
 // Live2D runtime loading and model utilities
 // ---------------------------------------------------------------------------
 
-// CDN-hosted scripts — loaded in order (each script may depend on the prior)
-const LIVE2D_CDN_SCRIPTS = [
-    // GSAP TweenLite — required by the Cubism 2 SDK
-    'https://cdnjs.cloudflare.com/ajax/libs/gsap/1.20.2/TweenLite.min.js',
-    // Live2D Cubism 2 SDK (.moc models)
-    'https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js',
-    // Live2D Cubism 4 Core (.moc3 models)
-    'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js',
-    // PixiJS v7
-    'https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js',
-    // pixi-live2d-display — attaches as PIXI.live2d, must load after PIXI
-    'https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism2.min.js',
-    // PIXI filters (Outline, Pixelate, CRT, etc.)
-    'https://cdn.jsdelivr.net/npm/pixi-filters@6.1.5/dist/pixi-filters.min.js',
+// Local lib scripts — same files used by Dustpan, served from this extension's lib/ folder.
+// pixi-live2d-display-lipsyncpatch-0.5.0-ls-8 supports PixiJS 7; the old CDN
+// cubism2.min.js (v0.4.0) only supports PixiJS 6 and is incompatible.
+const EXTENSION_PATH = 'scripts/extensions/third-party/Extension-Live2D+';
+
+const LIVE2D_RUNTIME_SCRIPTS = [
+    `${EXTENSION_PATH}/lib/TweenLite-1.20.2.js`,
+    `${EXTENSION_PATH}/lib/live2d.min.js`,
+    `${EXTENSION_PATH}/lib/live2dcubismcore.min.js`,
+    `${EXTENSION_PATH}/lib/pixi-7.4.2.min.js`,
+    `${EXTENSION_PATH}/lib/pixi-live2d-display-lipsyncpatch-0.5.0-ls-8.min.js`,
+    `${EXTENSION_PATH}/lib/pixi-filters.min.js`,
 ];
 
 const SCRIPT_ATTR = 'data-live2dplus-src';
@@ -39,7 +37,7 @@ function loadScript(src) {
     return new Promise((resolve, reject) => {
         const el = document.createElement('script');
         el.src = src;
-        el.async = false;
+        el.async = true;
         el.setAttribute(SCRIPT_ATTR, src);
         el.addEventListener('load', () => {
             el.dataset.loaded = 'true';
@@ -55,8 +53,15 @@ let _runtimePromise = null;
 export async function loadLive2DRuntime() {
     if (!_runtimePromise) {
         _runtimePromise = (async () => {
-            for (const src of LIVE2D_CDN_SCRIPTS) {
+            for (const src of LIVE2D_RUNTIME_SCRIPTS) {
                 await loadScript(src);
+            }
+            // Mute motion/expression audio (models can bundle sound clips in their motions).
+            // We silence the sound manager globally so models don't play unexpected noises.
+            // The lipsync speak() path uses its own audio element and is unaffected.
+            const live2d = window.PIXI?.live2d;
+            if (live2d?.SoundManager) {
+                live2d.SoundManager.volume = 0;
             }
         })();
     }
@@ -67,8 +72,6 @@ export async function loadLive2DRuntime() {
     const Live2DModel = PIXI?.live2d?.Live2DModel;
 
     if (!PIXI || !Live2DModel) {
-        // Reset so caller can retry
-        _runtimePromise = null;
         throw new Error('Live2D runtime failed to initialize (PIXI or Live2DModel missing).');
     }
 
