@@ -10,8 +10,17 @@ module.exports = {
     module: {
         rules: [
             {
+                // Bundle the legacy Live2D/PIXI runtime libraries as raw source
+                // strings. They are injected into the page as global-scope
+                // <script> blobs at runtime (see src/live2d.js), so they must
+                // not be transpiled or wrapped in a module closure.
+                test: /\.js$/,
+                include: path.join(__dirname, 'src', 'lib'),
+                type: 'asset/source',
+            },
+            {
                 test: /\.js/,
-                exclude: /node_modules/,
+                exclude: [/node_modules/, path.join(__dirname, 'src', 'lib')],
                 options: {
                     cacheDirectory: true,
                     presets: [

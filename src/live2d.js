@@ -2,21 +2,33 @@
 // Live2D runtime loading and model utilities
 // ---------------------------------------------------------------------------
 
-// Runtime scripts loaded from this extension's served folder.
-// SillyTavern mounts third-party extensions at /scripts/extensions/third-party/<folder>.
-const EXTENSION_FOLDER = 'Extension-Live2D+';
+// The runtime libraries are bundled into this extension's build by Webpack
+// (imported below as raw source strings via the `asset/source` rule in
+// webpack.config.js). They are legacy browser-global / UMD scripts that must
+// run in *global* scope so they can attach to `window` (window.PIXI,
+// window.Live2DCubismCore, etc.). We therefore execute them through
+// Blob-backed <script> tags rather than as ES modules — this avoids any
+// network requests (no 404s) while preserving correct global-scope semantics.
+import tweenLiteSource from './lib/TweenLite-1.20.2.js';
+import live2dSource from './lib/live2d.min.js';
+import cubismCoreSource from './lib/live2dcubismcore.min.js';
+import pixiSource from './lib/pixi-7.4.2.min.js';
+import pixiLive2DSource from './lib/pixi-live2d-display-lipsyncpatch-0.5.0-ls-8.min.js';
+import pixiFiltersSource from './lib/pixi-filters.min.js';
+
+const EXTENSION_FOLDER = 'Extension-Live2D-Plus';
 const EXTENSION_WEB_PATH = `/scripts/extensions/third-party/${EXTENSION_FOLDER}`;
 
-const LIVE2D_RUNTIME_FILES = [
-    'TweenLite-1.20.2.js',
-    'live2d.min.js',
-    'live2dcubismcore.min.js',
-    'pixi-7.4.2.min.js',
-    'pixi-live2d-display-lipsyncpatch-0.5.0-ls-8.min.js',
-    'pixi-filters.min.js',
+// Loaded in dependency order: cores and PIXI first, then the plugins that
+// extend window.PIXI (pixi-live2d-display, pixi-filters).
+const LIVE2D_RUNTIME_MODULES = [
+    { name: 'TweenLite-1.20.2.js', source: tweenLiteSource },
+    { name: 'live2d.min.js', source: live2dSource },
+    { name: 'live2dcubismcore.min.js', source: cubismCoreSource },
+    { name: 'pixi-7.4.2.min.js', source: pixiSource },
+    { name: 'pixi-live2d-display-lipsyncpatch-0.5.0-ls-8.min.js', source: pixiLive2DSource },
+    { name: 'pixi-filters.min.js', source: pixiFiltersSource },
 ];
-
-const LIVE2D_RUNTIME_SCRIPTS = LIVE2D_RUNTIME_FILES.map((file) => `${EXTENSION_WEB_PATH}/lib/${file}`);
 
 const SCRIPT_ATTR = 'data-live2dplus-src';
 
@@ -24,87 +36,44 @@ const SCRIPT_ATTR = 'data-live2dplus-src';
 // Script loading
 // ---------------------------------------------------------------------------
 
-function findScript(src) {
-    return document.querySelector(`script[${SCRIPT_ATTR}="${src}"]`);
+function findScript(name) {
+    return document.querySelector(`script[${SCRIPT_ATTR}="${name}"]`);
 }
 
-function appendScript(src, key = src) {
+// Execute a bundled library in global scope via a Blob-backed <script> tag.
+// Global-scope execution is required so plain `var Foo = ...` libraries and
+// UMD builds attach to `window` instead of being trapped in a module closure.
+function injectScript(name, source) {
     return new Promise((resolve, reject) => {
+        const existing = findScript(name);
+        if (existing) {
+            if (existing.dataset.loaded === 'true') return resolve();
+            existing.remove();
+        }
+
+        const blob = new Blob(
+            [`${source}\n//# sourceURL=${EXTENSION_WEB_PATH}/lib/${name}`],
+            { type: 'text/javascript' },
+        );
+        const blobUrl = URL.createObjectURL(blob);
+
         const el = document.createElement('script');
-        el.src = src;
-        el.async = true;
+        el.src = blobUrl;
+        // async=false preserves execution order for sequentially appended scripts.
+        el.async = false;
         el.type = 'text/javascript';
-        el.setAttribute(SCRIPT_ATTR, key);
+        el.setAttribute(SCRIPT_ATTR, name);
         el.addEventListener('load', () => {
             el.dataset.loaded = 'true';
+            URL.revokeObjectURL(blobUrl);
             resolve();
         }, { once: true });
         el.addEventListener('error', () => {
-            el.dataset.failed = 'true';
-            reject(new Error(`Failed to load: ${key}`));
+            URL.revokeObjectURL(blobUrl);
+            reject(new Error(`Failed to execute bundled library: ${name}`));
         }, { once: true });
         document.head.appendChild(el);
     });
-}
-
-function summarizeResponse(source) {
-    return source.replace(/\s+/g, ' ').trim().slice(0, 180);
-}
-
-function isDefinitelyNotScript(source) {
-    const prefix = source.trim().slice(0, 160).toLowerCase();
-    return prefix.startsWith('<!doctype')
-        || prefix.startsWith('<html')
-        || prefix.startsWith('unauthorized')
-        || prefix.startsWith('forbidden')
-        || prefix.startsWith('not found')
-        || prefix.includes('cannot get');
-}
-
-async function loadScriptFromBlob(src) {
-    const response = await fetch(src, { credentials: 'same-origin' });
-    const contentType = response.headers.get('content-type') || 'unknown content type';
-
-    if (!response.ok) {
-        throw new Error(`Failed to fetch ${src}: HTTP ${response.status} ${response.statusText || ''} (${contentType})`.trim());
-    }
-
-    const source = await response.text();
-    if (!source.trim()) {
-        throw new Error(`Failed to load ${src}: response was empty (${contentType})`);
-    }
-    if (isDefinitelyNotScript(source)) {
-        throw new Error(`Failed to load ${src}: server returned ${contentType}: ${summarizeResponse(source)}`);
-    }
-
-    const blob = new Blob([`${source}\n//# sourceURL=${src}`], { type: 'text/javascript' });
-    const blobUrl = URL.createObjectURL(blob);
-
-    try {
-        await appendScript(blobUrl, src);
-    } catch (blobError) {
-        throw new Error(`Failed to execute ${src} from Blob: ${blobError.message}`);
-    } finally {
-        URL.revokeObjectURL(blobUrl);
-    }
-}
-
-async function loadScript(src) {
-    if (typeof document === 'undefined') return Promise.resolve();
-
-    const existing = findScript(src);
-    if (existing) {
-        if (existing.dataset.loaded === 'true') return Promise.resolve();
-        if (existing.dataset.failed === 'true') existing.remove();
-        else {
-            return new Promise((resolve, reject) => {
-                existing.addEventListener('load', resolve, { once: true });
-                existing.addEventListener('error', () => reject(new Error(`Failed: ${src}`)), { once: true });
-            });
-        }
-    }
-
-    await loadScriptFromBlob(src);
 }
 
 let _runtimePromise = null;
@@ -112,8 +81,10 @@ let _runtimePromise = null;
 export async function loadLive2DRuntime() {
     if (!_runtimePromise) {
         _runtimePromise = (async () => {
-            for (const src of LIVE2D_RUNTIME_SCRIPTS) {
-                await loadScript(src);
+            if (typeof document === 'undefined') return;
+
+            for (const { name, source } of LIVE2D_RUNTIME_MODULES) {
+                await injectScript(name, source);
             }
 
             if (!window.Live2DCubismCore) {
