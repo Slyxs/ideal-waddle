@@ -2,18 +2,23 @@
 // Live2D runtime loading and model utilities
 // ---------------------------------------------------------------------------
 
-// Local lib scripts — same files used by Dustpan, served from this extension's lib/ folder.
-// pixi-live2d-display-lipsyncpatch-0.5.0-ls-8 supports PixiJS 7; the old CDN
-// cubism2.min.js (v0.4.0) only supports PixiJS 6 and is incompatible.
-const EXTENSION_PATH = 'scripts/extensions/third-party/Extension-Live2D+';
-
+// CDN scripts loaded in dependency order.
+// Notes:
+//  - Cubism 4 core (live2dcubismcore) is intentionally omitted — Extension-Live2d
+//    already loads it from its own lib/ folder.
+//  - PixiJS is capped at 7.x; pixi-live2d-display-lipsyncpatch is not compatible with 8.x.
+//  - pixi-filters must use the dist/browser/ build for correct UMD globals.
 const LIVE2D_RUNTIME_SCRIPTS = [
-    `${EXTENSION_PATH}/lib/TweenLite-1.20.2.js`,
-    `${EXTENSION_PATH}/lib/live2d.min.js`,
-    `${EXTENSION_PATH}/lib/live2dcubismcore.min.js`,
-    `${EXTENSION_PATH}/lib/pixi-7.4.2.min.js`,
-    `${EXTENSION_PATH}/lib/pixi-live2d-display-lipsyncpatch-0.5.0-ls-8.min.js`,
-    `${EXTENSION_PATH}/lib/pixi-filters.min.js`,
+    // GSAP 3 — provides TweenLite-equivalent functionality required by the Cubism 2 SDK
+    'https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js',
+    // Cubism 2.1 core
+    'https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js',
+    // PixiJS 7 (do NOT upgrade to 8.x)
+    'https://cdn.jsdelivr.net/npm/pixi.js@7.4.3/dist/pixi.min.js',
+    // pixi-live2d-display lipsync patch — PixiJS 7 compatible, supports Cubism 2 + 4
+    'https://cdn.jsdelivr.net/npm/pixi-live2d-display-lipsyncpatch@0.5.0-ls-8/dist/index.min.js',
+    // pixi-filters 6.x (browser UMD build, attaches to PIXI.filters)
+    'https://cdn.jsdelivr.net/npm/pixi-filters@6.1.5/dist/browser/pixi-filters.min.js',
 ];
 
 const SCRIPT_ATTR = 'data-live2dplus-src';
