@@ -2,83 +2,100 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import { normalizeSettings, defaultSettings } from './live2d/settings';
 
-// ---------------------------------------------------------------------------
-// Interception state — shared between the event handler and the React UI
-// ---------------------------------------------------------------------------
-let interceptEnabled = false;
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings persistence via ST's extension_settings
+// ─────────────────────────────────────────────────────────────────────────────
 
-export function setInterceptEnabled(value) {
-    interceptEnabled = value;
+const SETTINGS_KEY = 'live2d_tts';
+
+function loadSettings() {
+    const ctx = SillyTavern.getContext();
+    if (!ctx.extension_settings[SETTINGS_KEY]) {
+        ctx.extension_settings[SETTINGS_KEY] = { ...defaultSettings };
+    }
+    return ctx.extension_settings[SETTINGS_KEY];
 }
 
-export function getInterceptEnabled() {
-    return interceptEnabled;
+function saveSettings(settings) {
+    const ctx = SillyTavern.getContext();
+    ctx.extension_settings[SETTINGS_KEY] = settings;
+    ctx.saveSettingsDebounced?.();
 }
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // HTMLAudioElement.prototype.play patch
 //
-// ST's audio element is never appended to the DOM, but it does have
-// id="tts_audio" set on it, which we use as the filter.
-//
-// When we block play() we must also manually dispatch 'ended' so ST's
-// internal completeCurrentAudioJob() fires and the audio queue keeps moving.
-// ---------------------------------------------------------------------------
+// When Live2D is enabled we block ST's tts_audio playback so we can feed the
+// audio to the Live2D lipsync layer instead.  A synthetic 'ended' event is
+// dispatched so ST's internal audio queue keeps moving.
+// ─────────────────────────────────────────────────────────────────────────────
+
 const _originalPlay = HTMLAudioElement.prototype.play;
+
 HTMLAudioElement.prototype.play = function () {
-    if (this.id === 'tts_audio' && interceptEnabled) {
+    if (this.id === 'tts_audio' && isInterceptActive()) {
         const el = this;
-        // Unblock ST's queue on the next microtask tick
         Promise.resolve().then(() => el.dispatchEvent(new Event('ended')));
         return Promise.resolve();
     }
     return _originalPlay.apply(this, arguments);
 };
 
-// ---------------------------------------------------------------------------
-// TTS_AUDIO_READY listener — fires with the raw Blob BEFORE playback
-// ---------------------------------------------------------------------------
+function isInterceptActive() {
+    try {
+        const settings = normalizeSettings(SillyTavern.getContext().extension_settings[SETTINGS_KEY]);
+        return settings.enabled;
+    } catch {
+        return false;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TTS_AUDIO_READY listener
+// ─────────────────────────────────────────────────────────────────────────────
+
 function setupTtsIntercept() {
     const { eventSource, eventTypes } = SillyTavern.getContext();
 
     eventSource.on(eventTypes.TTS_AUDIO_READY, ({ audio, text, characterName }) => {
-        if (!interceptEnabled) return;
+        if (!isInterceptActive()) return;
 
         let url;
         if (audio instanceof Blob) {
-            // createObjectURL gives a real blob: URL the Live2D library can consume
             url = URL.createObjectURL(audio);
         } else if (typeof audio === 'string') {
-            // Some providers (e.g. ElevenLabs CDN) return a plain URL already
             url = audio;
         } else {
             console.warn('[Live2D TTS] Unrecognised audio type:', typeof audio);
             return;
         }
 
-        console.log('[Live2D TTS] Intercepted audio URL for "' + characterName + '":', url);
+        console.log('[Live2D TTS] Intercepted audio for "' + characterName + '"');
         console.log('[Live2D TTS] Text:', text);
-        // TODO: hand url + text to Live2D lipsync & Vosk
-        // When done, call URL.revokeObjectURL(url) to free memory (Blob URLs only)
+        console.log('[Live2D TTS] Blob URL:', url);
+        // TODO: feed url + text to Vosk for timestamps, then drive lipsync
+        // Remember to call URL.revokeObjectURL(url) once done (Blob URLs only)
     });
 }
 
 setupTtsIntercept();
 
-// ---------------------------------------------------------------------------
-// React UI
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// React root
+// ─────────────────────────────────────────────────────────────────────────────
+
 const rootContainer = document.getElementById('extensions_settings');
-const rootElement = document.createElement('div');
+const rootElement   = document.createElement('div');
 rootContainer.appendChild(rootElement);
 
 const root = ReactDOM.createRoot(rootElement);
 root.render(
     <React.StrictMode>
         <App
-            getEnabled={getInterceptEnabled}
-            setEnabled={setInterceptEnabled}
+            loadSettings={loadSettings}
+            saveSettings={saveSettings}
         />
-    </React.StrictMode>
+    </React.StrictMode>,
 );
