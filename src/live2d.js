@@ -13,9 +13,9 @@ const LIVE2D_CDN_SCRIPTS = [
     // PixiJS v7
     'https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js',
     // pixi-live2d-display — attaches as PIXI.live2d, must load after PIXI
-    'https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.5.0/dist/index.min.js',
+    'https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism2.min.js',
     // PIXI filters (Outline, Pixelate, CRT, etc.)
-    'https://cdn.jsdelivr.net/npm/pixi-filters@5.0.0/dist/pixi-filters.min.js',
+    'https://cdn.jsdelivr.net/npm/pixi-filters@6.1.5/dist/pixi-filters.min.js',
 ];
 
 const SCRIPT_ATTR = 'data-live2dplus-src';
