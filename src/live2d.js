@@ -31,6 +31,7 @@ const LIVE2D_RUNTIME_MODULES = [
 ];
 
 const SCRIPT_ATTR = 'data-live2dplus-src';
+const MOTION_AUDIO_PATCHED = '__live2dPlusMotionAudioPatched';
 
 // ---------------------------------------------------------------------------
 // Script loading
@@ -78,6 +79,13 @@ function injectScript(name, source) {
 
 let _runtimePromise = null;
 
+function muteLive2DSoundManager() {
+    const soundManager = window.PIXI?.live2d?.SoundManager;
+    if (soundManager) {
+        soundManager.volume = 0;
+    }
+}
+
 export async function loadLive2DRuntime() {
     if (!_runtimePromise) {
         _runtimePromise = (async () => {
@@ -91,13 +99,9 @@ export async function loadLive2DRuntime() {
                 throw new Error(`Cubism 4 core failed to load from ${EXTENSION_WEB_PATH}/lib/live2dcubismcore.min.js`);
             }
 
-            // Mute motion/expression audio (models can bundle sound clips in their motions).
-            // We silence the sound manager globally so models don't play unexpected noises.
-            // The lipsync speak() path uses its own audio element and is unaffected.
-            const live2d = window.PIXI?.live2d;
-            if (live2d?.SoundManager) {
-                live2d.SoundManager.volume = 0;
-            }
+            // Default model-bundled motion sounds to silent. The per-model patch
+            // below keeps motion playback muted even after speak() raises volume.
+            muteLive2DSoundManager();
         })();
     }
 
@@ -111,6 +115,60 @@ export async function loadLive2DRuntime() {
     }
 
     return { PIXI, Live2DModel };
+}
+
+function isPlainOptions(value) {
+    return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeMotionOptions(priority, options) {
+    if (isPlainOptions(priority) && options === undefined) {
+        return { priority: undefined, options: priority };
+    }
+
+    return { priority, options };
+}
+
+function mutedMotionOptions(options) {
+    return { ...(isPlainOptions(options) ? options : {}), volume: 0 };
+}
+
+export function muteModelMotionAudio(model) {
+    const motionManager = model?.internalModel?.motionManager;
+    if (!motionManager || motionManager[MOTION_AUDIO_PATCHED]) return;
+
+    muteLive2DSoundManager();
+
+    if (typeof motionManager.startMotion === 'function') {
+        const originalStartMotion = motionManager.startMotion.bind(motionManager);
+        motionManager.startMotion = (groupName, motionIndex, priority, options) => {
+            const normalized = normalizeMotionOptions(priority, options);
+            return originalStartMotion(
+                groupName,
+                motionIndex,
+                normalized.priority,
+                mutedMotionOptions(normalized.options),
+            );
+        };
+    }
+
+    if (typeof motionManager.startRandomMotion === 'function') {
+        const originalStartRandomMotion = motionManager.startRandomMotion.bind(motionManager);
+        motionManager.startRandomMotion = (groupName, priority, options) => {
+            const normalized = normalizeMotionOptions(priority, options);
+            return originalStartRandomMotion(
+                groupName,
+                normalized.priority,
+                mutedMotionOptions(normalized.options),
+            );
+        };
+    }
+
+    try {
+        Object.defineProperty(motionManager, MOTION_AUDIO_PATCHED, { value: true });
+    } catch {
+        motionManager[MOTION_AUDIO_PATCHED] = true;
+    }
 }
 
 // ---------------------------------------------------------------------------

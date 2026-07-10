@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { normalizeSettings, resolveModelUrl, MODEL_SOURCES } from './settings';
 import { EXTENSION_WEB_PATH } from './stt';
 import { fetchOpenAiModels } from './dynamicAnalysis';
-import { loadLive2DRuntime, buildFilters, applyModelTransform, applyModelInteraction } from './live2d';
+import { loadLive2DRuntime, buildFilters, applyModelTransform, applyModelInteraction, muteModelMotionAudio } from './live2d';
 
 const LIVE2D_PLUS_SETTINGS_STYLES = `
 .live2d-plus-settings .field,
@@ -176,6 +176,31 @@ function getExpressionLabel(expr, index) {
 
 function MotionTestSection() {
     const [modelInfo, setModelInfo] = useState({ name: '', motions: {}, expressions: [], message: '' });
+    const resetTimerRef = useRef(0);
+
+    const clearTestReset = useCallback(() => {
+        if (resetTimerRef.current && typeof window !== 'undefined') {
+            window.clearTimeout(resetTimerRef.current);
+        }
+        resetTimerRef.current = 0;
+    }, []);
+
+    const scheduleTestReset = useCallback((model, delayMs = DEFAULT_STATE_RESET_DELAY_MS) => {
+        clearTestReset();
+        if (!model) return;
+        if (typeof window === 'undefined') {
+            resetDynamicState(model);
+            return;
+        }
+
+        const safeDelay = Math.min(Math.max(Number(delayMs) || 0, 0), 60000);
+        resetTimerRef.current = window.setTimeout(() => {
+            resetTimerRef.current = 0;
+            resetDynamicState(model);
+        }, safeDelay);
+    }, [clearTestReset]);
+
+    useEffect(() => clearTestReset, [clearTestReset]);
 
     const refresh = useCallback(() => {
         const model = window.live2dPlusModel;
@@ -205,14 +230,77 @@ function MotionTestSection() {
         setModelInfo({ name, motions, expressions, message: hasAny ? '' : 'No motions or expressions found.' });
     }, []);
 
-    function playMotion(group, index) {
-        try { window.live2dPlusModel?.motion?.(group, index); }
-        catch (err) { console.error('[Live2D+] Motion error:', err); }
+    async function playMotion(group, index) {
+        const model = window.live2dPlusModel;
+        if (!model?.motion) return;
+
+        const motionManager = getMotionManager(model);
+        let resetHandled = false;
+        let detachMotionFinish = () => {};
+
+        const resetOnce = () => {
+            if (resetHandled) return;
+            resetHandled = true;
+            detachMotionFinish();
+            clearTestReset();
+            resetDynamicState(model);
+        };
+
+        try {
+            clearTestReset();
+            stopModelMotionsOnly(model);
+
+            if (motionManager?.on) {
+                const handleMotionFinish = () => resetOnce();
+                motionManager.on('motionFinish', handleMotionFinish);
+                detachMotionFinish = () => {
+                    try { motionManager.off?.('motionFinish', handleMotionFinish); } catch { /* noop */ }
+                    try { motionManager.removeListener?.('motionFinish', handleMotionFinish); } catch { /* noop */ }
+                };
+            }
+
+            let fallbackDelay = DEFAULT_STATE_RESET_DELAY_MS;
+            try {
+                const motion = await motionManager?.loadMotion?.(group, index);
+                fallbackDelay = readMotionDurationMs(motion);
+            } catch { /* use fallback */ }
+
+            clearTestReset();
+            if (typeof window === 'undefined') {
+                resetOnce();
+            } else {
+                const safeDelay = Math.min(Math.max(Number(fallbackDelay) || 0, 0), 60000) + 250;
+                resetTimerRef.current = window.setTimeout(resetOnce, safeDelay);
+            }
+            const result = model.motion(group, index, undefined, { volume: 0 });
+            Promise.resolve(result)
+                .then((started) => {
+                    if (started === false) resetOnce();
+                })
+                .catch((err) => {
+                    console.error('[Live2D+] Motion error:', err);
+                    resetOnce();
+                });
+        } catch (err) {
+            console.error('[Live2D+] Motion error:', err);
+            resetOnce();
+        }
     }
 
     function playExpression(index) {
-        try { window.live2dPlusModel?.expression?.(index); }
-        catch (err) { console.error('[Live2D+] Expression error:', err); }
+        const model = window.live2dPlusModel;
+        if (!model?.expression) return;
+
+        try {
+            clearTestReset();
+            const result = model.expression(index);
+            Promise.resolve(result)
+                .catch((err) => console.error('[Live2D+] Expression error:', err))
+                .finally(() => scheduleTestReset(model));
+        } catch (err) {
+            console.error('[Live2D+] Expression error:', err);
+            scheduleTestReset(model);
+        }
     }
 
     const btnStyle = { fontSize: '0.8em', padding: '2px 8px', marginBottom: '4px' };
@@ -650,6 +738,20 @@ function resetModelExpression(model) {
     try { model?.expression?.(0); } catch { /* noop */ }
 }
 
+function readMotionDurationMs(motion, fallbackMs = DEFAULT_STATE_RESET_DELAY_MS) {
+    const rawDuration = [
+        motion?.duration,
+        motion?._duration,
+        typeof motion?.getDuration === 'function' ? motion.getDuration() : null,
+    ]
+        .map((value) => Number(value))
+        .find((value) => Number.isFinite(value) && value > 0);
+
+    if (!Number.isFinite(rawDuration)) return fallbackMs;
+    const durationMs = rawDuration > 100 ? rawDuration : rawDuration * 1000;
+    return Math.min(Math.max(Math.round(durationMs), 250), 60000);
+}
+
 function resetDynamicState(model) {
     stopModelMotionsOnly(model);
     resetModelExpression(model);
@@ -979,6 +1081,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                     model.alpha = settings.opacity;
                     applyModelTransform(model, settings);
                     applyModelInteraction(model, settings);
+                    muteModelMotionAudio(model);
                     applyFilters(settings);
                     window.live2dPlusModel = model;
                     dispatchRuntimeModelInfo(model);
