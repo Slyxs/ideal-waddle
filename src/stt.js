@@ -444,14 +444,12 @@ async function transcribeBlob(blob) {
         throw new Error('Decoded audio is empty.');
     }
 
-    // Vosk models are trained on 16 kHz mono. Transcription can work at other
-    // rates, but word timestamps are usually missing unless the audio is
-    // resampled to exactly 16 kHz before recognition.
-    const {
-        sampleRate: recognizerSampleRate,
-        duration,
-        samples: mono,
-    } = await resampleTo16kHzMono(audioBuffer);
+    // Pass the decoded audio to Vosk at its native sample rate. Vosk resamples
+    // internally and timestamps are more reliable when we let it handle the
+    // original buffer instead of pre-resampling with OfflineAudioContext.
+    const recognizerSampleRate = audioBuffer.sampleRate;
+    const duration = audioBuffer.duration;
+    const mono = mixAudioBufferToMono(audioBuffer);
 
     const recognizer = new loadedModel.KaldiRecognizer(recognizerSampleRate);
     if (typeof recognizer.setWords === 'function') {
@@ -481,13 +479,27 @@ async function transcribeBlob(blob) {
         // Debug: if word timestamps are missing, log the raw Vosk messages so
         // we can see what shape the model is actually returning.
         const normalizedResults = resultMessages.map(normalizeResultMessage);
-        const words = normalizedResults.flatMap((result) => result.words);
-        const text = normalizedResults
+        let words = normalizedResults.flatMap((result) => result.words);
+        let text = normalizedResults
             .map((result) => result.text)
             .filter(Boolean)
             .join(' ')
             .replace(/\s+/g, ' ')
             .trim() || words.map((entry) => entry.word).join(' ');
+
+        // Fallback: if the final result is empty but partial results exist,
+        // Vosk recognized something but never flushed a final segment. Use the
+        // last partial transcript so the lip-sync pipeline still gets text.
+        if (!text && partialResults.length) {
+            const lastPartial = partialResults[partialResults.length - 1];
+            const partialText = typeof lastPartial?.result?.partial === 'string'
+                ? lastPartial.result.partial.trim()
+                : '';
+            if (partialText) {
+                console.warn(`[${MODULE}] Vosk produced no final result; falling back to last partial transcript.`);
+                text = partialText;
+            }
+        }
 
         console.log(`[${MODULE}] Extracted text: "${text}"`);
         console.log(`[${MODULE}] Extracted ${words.length} word timestamp(s):`, words);
@@ -498,6 +510,10 @@ async function transcribeBlob(blob) {
             console.warn(`[${MODULE}] Vosk returned ${resultMessages.length} result segment(s) but no word timestamps. ` +
                 'Raw results logged below.');
             console.log(`[${MODULE}] Raw Vosk result messages:`, resultMessages);
+            console.log(`[${MODULE}] Partial results:`, partialResults);
+        } else if (!words.length && partialResults.length) {
+            console.warn(`[${MODULE}] Vosk returned partial results but no word timestamps. ` +
+                'The model may not support word timestamps, or the audio format prevented extraction.');
             console.log(`[${MODULE}] Partial results:`, partialResults);
         } else if (words.length) {
             console.log(`[${MODULE}] Produced ${words.length} word timestamp(s).`);
