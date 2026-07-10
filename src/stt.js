@@ -153,6 +153,7 @@ export async function loadSttModel(modelUrl) {
         }
 
         try {
+            console.log(`[${MODULE}] Creating Vosk model from ${url}...`);
             const model = await Vosk.createModel(url, VOSK_LOG_LEVEL);
             loadedModel = model;
             setModelState({ state: 'ready', message: `Model ready — ${url}`, modelUrl: url });
@@ -185,13 +186,17 @@ async function decodeAudioBlob(blob) {
         throw new Error('A browser audio Blob is required for Vosk transcription.');
     }
 
+    console.log(`[${MODULE}] Decoding audio blob: type=${blob.type}, size=${blob.size} bytes`);
+
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx) throw new Error('Web Audio API is not available.');
 
     const audioContext = new AudioCtx();
     try {
         const arrayBuffer = await blob.arrayBuffer();
-        return await audioContext.decodeAudioData(arrayBuffer.slice(0));
+        const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+        console.log(`[${MODULE}] Audio decoded: ${decoded.sampleRate} Hz, ${decoded.numberOfChannels} channel(s), ${decoded.duration.toFixed(3)}s, ${decoded.length} samples`);
+        return decoded;
     } finally {
         try { audioContext.close(); } catch { /* noop */ }
     }
@@ -233,10 +238,12 @@ async function resampleTo16kHzMono(audioBuffer) {
     source.connect(offlineContext.destination);
     source.start(0);
     const rendered = await offlineContext.startRendering();
+    const mono = Float32Array.from(rendered.getChannelData(0));
+    console.log(`[${MODULE}] Resampled to ${targetSampleRate} Hz mono: ${mono.length} samples (~${(mono.length / targetSampleRate).toFixed(3)}s)`);
     return {
         sampleRate: targetSampleRate,
         duration: audioBuffer.duration,
-        samples: Float32Array.from(rendered.getChannelData(0)),
+        samples: mono,
     };
 }
 
@@ -390,15 +397,18 @@ function collectRecognizerResult(recognizer) {
     };
 
     recognizer.on('result', (message) => {
+        console.log(`[${MODULE}] Vosk 'result' event:`, message);
         resultMessages.push(message);
         if (finalRequested) scheduleSettle();
     });
     recognizer.on('partialresult', (message) => {
+        console.log(`[${MODULE}] Vosk 'partialresult' event:`, message);
         // We don't use partial results for file transcription, but keep them
         // for debugging in case word timestamps are missing.
         partialResults.push(message);
     });
     recognizer.on('error', (message) => {
+        console.error(`[${MODULE}] Vosk 'error' event:`, message);
         fail(new Error(message?.error || 'Vosk recognizer returned an error.'));
     });
 
@@ -410,6 +420,7 @@ function collectRecognizerResult(recognizer) {
         promise,
         requestFinal() {
             finalRequested = true;
+            console.log(`[${MODULE}] Requesting final Vosk result...`);
             recognizer.retrieveFinalResult();
             // In case no further 'result' fires, settle anyway.
             scheduleSettle();
@@ -425,6 +436,8 @@ async function transcribeBlob(blob) {
     if (!loadedModel) {
         throw new Error('Vosk model is not loaded. Load a model in the Live2D+ settings first.');
     }
+
+    console.log(`[${MODULE}] Starting transcription of blob: type=${blob.type}, size=${blob.size} bytes`);
 
     const audioBuffer = await decodeAudioBlob(blob);
     if (!audioBuffer?.sampleRate || !audioBuffer?.length) {
@@ -450,8 +463,10 @@ async function transcribeBlob(blob) {
 
     const collector = collectRecognizerResult(recognizer);
     const chunkFrames = readChunkFrames(recognizerSampleRate);
+    const totalChunks = Math.ceil(mono.length / chunkFrames);
 
     try {
+        console.log(`[${MODULE}] Feeding ${totalChunks} chunk(s) of ${chunkFrames} frames each.`);
         for (let offset = 0, chunk = 0; offset < mono.length; offset += chunkFrames, chunk += 1) {
             recognizer.acceptWaveformFloat(mono.slice(offset, offset + chunkFrames), recognizerSampleRate);
             // Yield periodically so we don't freeze the UI on long clips.
@@ -460,6 +475,8 @@ async function transcribeBlob(blob) {
 
         collector.requestFinal();
         const { resultMessages, partialResults } = await collector.promise;
+
+        console.log(`[${MODULE}] Vosk returned ${resultMessages.length} result segment(s) and ${partialResults.length} partial result(s).`);
 
         // Debug: if word timestamps are missing, log the raw Vosk messages so
         // we can see what shape the model is actually returning.
@@ -471,6 +488,9 @@ async function transcribeBlob(blob) {
             .join(' ')
             .replace(/\s+/g, ' ')
             .trim() || words.map((entry) => entry.word).join(' ');
+
+        console.log(`[${MODULE}] Extracted text: "${text}"`);
+        console.log(`[${MODULE}] Extracted ${words.length} word timestamp(s):`, words);
 
         const alignment = createCharacterAlignmentFromWords(words, text || '', duration);
 
@@ -585,7 +605,12 @@ export function setupSttPipeline({ isEnabled, getModelUrl } = {}) {
     }
 
     eventSource.on(readyEvent, async ({ audio, text, characterName } = {}) => {
-        if (typeof isEnabled === 'function' && !isEnabled()) return;
+        console.log(`[${MODULE}] TTS_AUDIO_READY fired for character="${characterName || ''}", audio type=`, typeof audio, audio);
+
+        if (typeof isEnabled === 'function' && !isEnabled()) {
+            console.log(`[${MODULE}] STT is disabled in settings; skipping transcription.`);
+            return;
+        }
 
         // The model must be loaded manually beforehand.
         if (!isSttModelReady()) {
@@ -600,6 +625,7 @@ export function setupSttPipeline({ isEnabled, getModelUrl } = {}) {
                 console.warn(`[${MODULE}] Unrecognized TTS audio type:`, typeof audio);
                 return;
             }
+            console.log(`[${MODULE}] Resolved TTS audio to blob: type=${blob.type}, size=${blob.size} bytes`);
 
             const result = await transcribeBlob(blob);
             logTimestamps(characterName, result.text || text || '', result.words, result.alignment, result.duration);
