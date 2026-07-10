@@ -220,33 +220,6 @@ function mixAudioBufferToMono(audioBuffer) {
     return mono;
 }
 
-/**
- * Resample decoded audio to 16 kHz mono using OfflineAudioContext.
- * Vosk models are trained on 16 kHz audio; feeding other rates often
- * transcribes fine but yields no word-level timestamps.
- */
-async function resampleTo16kHzMono(audioBuffer) {
-    const targetSampleRate = 16000;
-    const targetLength = Math.max(1, Math.ceil(audioBuffer.duration * targetSampleRate));
-    const OfflineAudioContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-    if (!OfflineAudioContext) {
-        throw new Error('OfflineAudioContext is not available for resampling.');
-    }
-    const offlineContext = new OfflineAudioContext(1, targetLength, targetSampleRate);
-    const source = offlineContext.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(offlineContext.destination);
-    source.start(0);
-    const rendered = await offlineContext.startRendering();
-    const mono = Float32Array.from(rendered.getChannelData(0));
-    console.log(`[${MODULE}] Resampled to ${targetSampleRate} Hz mono: ${mono.length} samples (~${(mono.length / targetSampleRate).toFixed(3)}s)`);
-    return {
-        sampleRate: targetSampleRate,
-        duration: audioBuffer.duration,
-        samples: mono,
-    };
-}
-
 function readChunkFrames(sampleRate) {
     return Math.max(1024, Math.round(sampleRate * CHUNK_SECONDS));
 }
@@ -361,8 +334,8 @@ function createCharacterAlignmentFromWords(words, fallbackText, durationSeconds)
 // Recognizer result collection
 //
 // Vosk emits 'result' messages as it flushes segments. After we've pushed all
-// audio we call retrieveFinalResult() and settle a short moment later to catch
-// the trailing segment.
+// audio we call retrieveFinalResult() and wait for Vosk's final 'result' event;
+// resolving earlier can remove the recognizer before timestamps are emitted.
 // ---------------------------------------------------------------------------
 
 function collectRecognizerResult(recognizer) {
@@ -422,8 +395,6 @@ function collectRecognizerResult(recognizer) {
             finalRequested = true;
             console.log(`[${MODULE}] Requesting final Vosk result...`);
             recognizer.retrieveFinalResult();
-            // In case no further 'result' fires, settle anyway.
-            scheduleSettle();
         },
     };
 }
