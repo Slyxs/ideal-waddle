@@ -176,6 +176,19 @@ function getExpressionLabel(expr, index) {
 
 function MotionTestSection() {
     const [modelInfo, setModelInfo] = useState({ name: '', motions: {}, expressions: [], message: '' });
+    const resetTimerRef = useRef(0);
+
+    useEffect(() => () => {
+        if (resetTimerRef.current) window.clearTimeout(resetTimerRef.current);
+    }, []);
+
+    const scheduleTestReset = useCallback((delayMs = DEFAULT_STATE_RESET_DELAY_MS) => {
+        if (resetTimerRef.current) window.clearTimeout(resetTimerRef.current);
+        resetTimerRef.current = window.setTimeout(() => {
+            resetTimerRef.current = 0;
+            resetDynamicState(window.live2dPlusModel);
+        }, Math.min(Math.max(Number(delayMs) || DEFAULT_STATE_RESET_DELAY_MS, 0), 60000));
+    }, []);
 
     const refresh = useCallback(() => {
         const model = window.live2dPlusModel;
@@ -205,13 +218,19 @@ function MotionTestSection() {
         setModelInfo({ name, motions, expressions, message: hasAny ? '' : 'No motions or expressions found.' });
     }, []);
 
-    function playMotion(group, index) {
-        try { window.live2dPlusModel?.motion?.(group, index); }
+    function playMotion(group, index, motion) {
+        try {
+            window.live2dPlusModel?.motion?.(group, index);
+            scheduleTestReset(readMotionDurationMs(motion));
+        }
         catch (err) { console.error('[Live2D+] Motion error:', err); }
     }
 
     function playExpression(index) {
-        try { window.live2dPlusModel?.expression?.(index); }
+        try {
+            window.live2dPlusModel?.expression?.(index);
+            scheduleTestReset(DEFAULT_STATE_RESET_DELAY_MS);
+        }
         catch (err) { console.error('[Live2D+] Expression error:', err); }
     }
 
@@ -253,7 +272,7 @@ function MotionTestSection() {
                     </small>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                         {motions.map((motion, i) => (
-                            <div key={i} className="menu_button" onClick={() => playMotion(group, i)} style={btnStyle}>
+                            <div key={i} className="menu_button" onClick={() => playMotion(group, i, motion)} style={btnStyle}>
                                 {getMotionLabel(motion, i)}
                             </div>
                         ))}
@@ -474,6 +493,20 @@ const TTS_DYNAMIC_TIMESTAMPS_READY_EVENT = 'TTSDynamicTimestampsReady';
 const LIVE2D_MODEL_INFO_EVENT = 'Live2DPlusModelInfoChanged';
 const LIVE2D_MOTION_PRIORITY_FORCE = 3;
 const DEFAULT_STATE_RESET_DELAY_MS = 1800;
+
+function readMotionDurationMs(motion, fallbackMs = DEFAULT_STATE_RESET_DELAY_MS) {
+    const rawDuration = [
+        motion?.duration,
+        motion?._duration,
+        typeof motion?.getDuration === 'function' ? motion.getDuration() : null,
+    ]
+        .map((value) => Number(value))
+        .find((value) => Number.isFinite(value) && value > 0);
+
+    if (!Number.isFinite(rawDuration)) return fallbackMs;
+    const durationMs = rawDuration > 100 ? rawDuration : rawDuration * 1000;
+    return Math.min(Math.max(Math.round(durationMs), 250), 30000);
+}
 
 function readNeutralEmotion(settings = {}) {
     const labels = Array.isArray(settings.emotionLabels) ? settings.emotionLabels : [];
