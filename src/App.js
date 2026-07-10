@@ -2,7 +2,88 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { normalizeSettings, resolveModelUrl, MODEL_SOURCES } from './settings';
 import { EXTENSION_WEB_PATH } from './stt';
+import { fetchOpenAiModels } from './dynamicAnalysis';
 import { loadLive2DRuntime, buildFilters, applyModelTransform, applyModelInteraction } from './live2d';
+
+const LIVE2D_PLUS_SETTINGS_STYLES = `
+.live2d-plus-settings .field,
+.live2d-plus-settings .inline-control {
+    display: block;
+    margin-bottom: 8px;
+}
+
+.live2d-plus-settings .field > span,
+.live2d-plus-settings .inline-control > span,
+.live2d-plus-settings .section-caption {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 0.85em;
+    font-weight: 700;
+    opacity: 0.72;
+}
+
+.live2d-plus-settings .inline-actions,
+.live2d-plus-settings .row-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.live2d-plus-settings .inline-actions .text_pole {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.live2d-plus-settings .hint {
+    margin: 4px 0 8px;
+    font-size: 0.82em;
+    opacity: 0.62;
+}
+
+.live2d-plus-settings .mapping-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 360px;
+    overflow-y: auto;
+    padding-right: 2px;
+    margin-bottom: 10px;
+}
+
+.live2d-plus-settings .mapping-list.compact {
+    max-height: none;
+}
+
+.live2d-plus-settings .mapping-row {
+    display: grid;
+    grid-template-columns: minmax(96px, 1fr) minmax(120px, 1fr) minmax(120px, 1fr) auto;
+    gap: 6px;
+    align-items: end;
+    padding: 6px;
+    border: 1px solid rgba(128, 128, 128, 0.25);
+    border-radius: 6px;
+}
+
+.live2d-plus-settings .priority-row {
+    grid-template-columns: 1fr auto;
+    align-items: center;
+}
+
+.live2d-plus-settings .compact-field {
+    margin-bottom: 0;
+}
+
+.live2d-plus-settings .mapping-row .text_pole {
+    width: 100%;
+}
+
+@media (max-width: 640px) {
+    .live2d-plus-settings .mapping-row {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+    }
+}
+`;
 
 // ---------------------------------------------------------------------------
 // Shared UI primitives
@@ -183,6 +264,608 @@ function MotionTestSection() {
     );
 }
 
+function MappingSelect({ label, value, options, onChange }) {
+    return (
+        <label className="inline-control">
+            <span>{label}</span>
+            <select className="text_pole" value={value || ''} onChange={(event) => onChange(event.target.value)}>
+                <option value="">None</option>
+                {options.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+            </select>
+        </label>
+    );
+}
+
+function DynamicSettingsSection({ settings, onChange }) {
+    const [modelInfo, setModelInfo] = useState(() => window.live2dPlusModelInfo || readRuntimeModelInfo(window.live2dPlusModel));
+    const [availableModels, setAvailableModels] = useState([]);
+    const [modelFetchState, setModelFetchState] = useState({ loading: false, message: '' });
+
+    useEffect(() => {
+        const updateModelInfo = (event) => setModelInfo(event.detail || readRuntimeModelInfo(window.live2dPlusModel));
+        window.addEventListener(LIVE2D_MODEL_INFO_EVENT, updateModelInfo);
+        updateModelInfo({ detail: window.live2dPlusModelInfo || readRuntimeModelInfo(window.live2dPlusModel) });
+        return () => window.removeEventListener(LIVE2D_MODEL_INFO_EVENT, updateModelInfo);
+    }, []);
+
+    const motionOptions = Object.entries(modelInfo?.motions || {}).flatMap(([groupName, motions]) => (
+        motions.map((motion, index) => ({
+            value: `${groupName}:${index}`,
+            label: `${groupName} / ${getMotionLabel(motion, index)}`,
+        }))
+    ));
+    const expressionOptions = (modelInfo?.expressions || []).map((expression, index) => ({
+        value: String(index),
+        label: getExpressionLabel(expression, index),
+    }));
+
+    const update = (patch) => onChange({ ...settings, ...patch });
+    const updateDisable = (key, value) => update({ disableSettings: { ...settings.disableSettings, [key]: value } });
+    const updateEmotionMapping = (emotion, patch) => update({
+        emotionMappings: {
+            ...settings.emotionMappings,
+            [emotion]: { ...(settings.emotionMappings?.[emotion] || {}), ...patch },
+        },
+    });
+    const updateActionMapping = (index, patch) => update({
+        actionMappings: settings.actionMappings.map((action, actionIndex) => (
+            actionIndex === index ? { ...action, ...patch } : action
+        )),
+    });
+    const movePriority = (index, direction) => {
+        const next = [...settings.priorityList];
+        const target = index + direction;
+        if (target < 0 || target >= next.length) return;
+        [next[index], next[target]] = [next[target], next[index]];
+        update({ priorityList: next.map((item, itemIndex) => ({ ...item, priority: next.length - itemIndex })) });
+    };
+
+    const addActionMapping = () => update({
+        actionMappings: [
+            ...settings.actionMappings,
+            { id: `action-${Date.now()}`, description: '', motion: '', expression: '' },
+        ],
+    });
+
+    const removeActionMapping = (index) => update({
+        actionMappings: settings.actionMappings.filter((_, actionIndex) => actionIndex !== index),
+    });
+
+    const fetchModels = async () => {
+        setModelFetchState({ loading: true, message: 'Fetching models...' });
+        try {
+            const models = await fetchOpenAiModels({ baseUrl: settings.analysisBaseUrl, apiKey: settings.analysisApiKey });
+            setAvailableModels(models);
+            if (models.length > 0 && !settings.analysisModel) update({ analysisModel: models[0].id });
+            setModelFetchState({ loading: false, message: `${models.length} model${models.length === 1 ? '' : 's'} found.` });
+        } catch (error) {
+            setModelFetchState({ loading: false, message: error?.message || 'Failed to fetch models.' });
+        }
+    };
+
+    return (
+        <SubDrawer title="Dynamic Analysis" defaultOpen={false}>
+            <CheckboxRow
+                label="Route SillyTavern TTS to Live2D"
+                checked={settings.routeTtsToLive2D}
+                onChange={(value) => update({ routeTtsToLive2D: value })}
+            />
+            <CheckboxRow
+                label="Prevent original SillyTavern playback"
+                checked={settings.blockOriginalTtsPlayback}
+                onChange={(value) => update({ blockOriginalTtsPlayback: value })}
+            />
+            <CheckboxRow
+                label="Dynamic emotion/action mode"
+                checked={settings.dynamicMode}
+                onChange={(value) => update({ dynamicMode: value })}
+            />
+            <CheckboxRow
+                label="Reset expression after playback"
+                checked={settings.resetExpressionAfterPlayback}
+                onChange={(value) => update({ resetExpressionAfterPlayback: value })}
+            />
+
+            <label className="field">
+                <span>OpenAI-compatible URL</span>
+                <input
+                    className="text_pole"
+                    type="url"
+                    value={settings.analysisBaseUrl}
+                    onChange={(event) => update({ analysisBaseUrl: event.target.value })}
+                    placeholder="https://proxy.example.com/v1"
+                />
+            </label>
+            <label className="field">
+                <span>API key</span>
+                <input
+                    className="text_pole"
+                    type="password"
+                    value={settings.analysisApiKey}
+                    onChange={(event) => update({ analysisApiKey: event.target.value })}
+                    placeholder="Optional bearer token"
+                />
+            </label>
+            <label className="field">
+                <span>Analysis model</span>
+                <div className="inline-actions">
+                    <select
+                        className="text_pole"
+                        value={settings.analysisModel}
+                        onChange={(event) => update({ analysisModel: event.target.value })}
+                    >
+                        <option value={settings.analysisModel}>{settings.analysisModel || 'Select a model'}</option>
+                        {availableModels.map((model) => (
+                            <option key={model.id} value={model.id}>{model.name || model.id}</option>
+                        ))}
+                    </select>
+                    <button className="menu_button" type="button" onClick={fetchModels} disabled={modelFetchState.loading}>
+                        {modelFetchState.loading ? 'Fetching...' : 'Fetch Models'}
+                    </button>
+                </div>
+            </label>
+            {modelFetchState.message && <div className="hint">{modelFetchState.message}</div>}
+
+            <div className="section-caption">Disable cue sources</div>
+            <CheckboxRow label="Emotion motions" checked={!settings.disableSettings.emotionMotions} onChange={(value) => updateDisable('emotionMotions', !value)} />
+            <CheckboxRow label="Emotion expressions" checked={!settings.disableSettings.emotionExpressions} onChange={(value) => updateDisable('emotionExpressions', !value)} />
+            <CheckboxRow label="Action motions" checked={!settings.disableSettings.actionMotions} onChange={(value) => updateDisable('actionMotions', !value)} />
+            <CheckboxRow label="Action expressions" checked={!settings.disableSettings.actionExpressions} onChange={(value) => updateDisable('actionExpressions', !value)} />
+
+            <div className="section-caption">Priority</div>
+            <div className="mapping-list compact">
+                {settings.priorityList.map((item, index) => (
+                    <div className="mapping-row priority-row" key={`${item.type}-${item.target}`}>
+                        <span>{item.label}</span>
+                        <div className="row-actions">
+                            <button className="menu_button" type="button" onClick={() => movePriority(index, -1)} disabled={index === 0}>Up</button>
+                            <button className="menu_button" type="button" onClick={() => movePriority(index, 1)} disabled={index === settings.priorityList.length - 1}>Down</button>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            <div className="section-caption">Emotion mappings</div>
+            <div className="mapping-list">
+                {settings.emotionLabels.map((emotion) => {
+                    const mapping = settings.emotionMappings?.[emotion] || {};
+                    return (
+                        <div className="mapping-row" key={emotion}>
+                            <strong>{emotion}</strong>
+                            <MappingSelect label="Motion" value={mapping.motion} options={motionOptions} onChange={(value) => updateEmotionMapping(emotion, { motion: value })} />
+                            <MappingSelect label="Expression" value={mapping.expression} options={expressionOptions} onChange={(value) => updateEmotionMapping(emotion, { expression: value })} />
+                        </div>
+                    );
+                })}
+            </div>
+
+            <div className="section-caption">Action mappings</div>
+            <div className="mapping-list">
+                {settings.actionMappings.map((action, index) => (
+                    <div className="mapping-row" key={action.id || index}>
+                        <label className="field compact-field">
+                            <span>Action</span>
+                            <input
+                                className="text_pole"
+                                type="text"
+                                value={action.description || ''}
+                                onChange={(event) => updateActionMapping(index, { description: event.target.value })}
+                                placeholder="laughs, sighs, waves..."
+                            />
+                        </label>
+                        <MappingSelect label="Motion" value={action.motion} options={motionOptions} onChange={(value) => updateActionMapping(index, { motion: value })} />
+                        <MappingSelect label="Expression" value={action.expression} options={expressionOptions} onChange={(value) => updateActionMapping(index, { expression: value })} />
+                        <button className="menu_button" type="button" onClick={() => removeActionMapping(index)}>Remove</button>
+                    </div>
+                ))}
+            </div>
+            <button className="menu_button" type="button" onClick={addActionMapping}>Add Action</button>
+        </SubDrawer>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic Live2D playback helpers
+// ---------------------------------------------------------------------------
+
+const TTS_DYNAMIC_TIMESTAMPS_READY_EVENT = 'TTSDynamicTimestampsReady';
+const LIVE2D_MODEL_INFO_EVENT = 'Live2DPlusModelInfoChanged';
+const LIVE2D_MOTION_PRIORITY_FORCE = 3;
+const DEFAULT_STATE_RESET_DELAY_MS = 1800;
+
+function readNeutralEmotion(settings = {}) {
+    const labels = Array.isArray(settings.emotionLabels) ? settings.emotionLabels : [];
+    return labels.find((label) => String(label).toLowerCase() === 'neutral') || labels[0] || 'Neutral';
+}
+
+function normalizePlaybackSegments(detail, settings) {
+    const source = Array.isArray(detail?.segments) && detail.segments.length > 0
+        ? detail.segments
+        : [{ emotion: readNeutralEmotion(settings), action: null, text: detail?.text || '' }];
+
+    return source.map((segment) => ({
+        emotion: typeof segment?.emotion === 'string' && segment.emotion.trim()
+            ? segment.emotion.trim()
+            : readNeutralEmotion(settings),
+        action: typeof segment?.action === 'string' && segment.action.trim() ? segment.action.trim() : null,
+        text: typeof segment?.text === 'string' ? segment.text : '',
+        startTime: Number.isFinite(Number(segment?.startTime)) ? Number(segment.startTime) : null,
+        endTime: Number.isFinite(Number(segment?.endTime)) ? Number(segment.endTime) : null,
+        duration: Number.isFinite(Number(segment?.duration)) ? Number(segment.duration) : null,
+    }));
+}
+
+function pickAlignment(detail) {
+    return detail?.alignment || detail?.timestamps || detail?.normalizedAlignment || null;
+}
+
+function readAlignmentDuration(alignment) {
+    const endTimes = Array.isArray(alignment?.character_end_times_seconds)
+        ? alignment.character_end_times_seconds
+        : [];
+    const last = Number(endTimes[endTimes.length - 1]);
+    return Number.isFinite(last) ? last : 0;
+}
+
+function distributeSegmentsByTextLength(segments, duration) {
+    const totalChars = segments.reduce((count, segment) => count + Array.from(segment.text || '').length, 0);
+    const safeDuration = Number.isFinite(Number(duration)) && Number(duration) > 0
+        ? Number(duration)
+        : Math.max(segments.length, 1);
+    let cursor = 0;
+
+    return segments.map((segment, index) => {
+        if (segment.startTime != null && segment.endTime != null) {
+            return { ...segment, duration: Math.max(0, segment.endTime - segment.startTime) };
+        }
+
+        const charCount = Array.from(segment.text || '').length || 1;
+        const segmentDuration = totalChars > 0
+            ? (charCount / totalChars) * safeDuration
+            : safeDuration / Math.max(segments.length, 1);
+        const startTime = cursor;
+        const isLast = index === segments.length - 1;
+        const endTime = isLast ? safeDuration : cursor + segmentDuration;
+        cursor = endTime;
+        return { ...segment, startTime, endTime, duration: Math.max(0, endTime - startTime) };
+    });
+}
+
+function calculatePlaybackTimeline(detail, settings) {
+    const segments = normalizePlaybackSegments(detail, settings);
+    const alignment = pickAlignment(detail);
+    const characters = Array.isArray(alignment?.characters) ? alignment.characters : [];
+    const startTimes = Array.isArray(alignment?.character_start_times_seconds)
+        ? alignment.character_start_times_seconds
+        : [];
+    const endTimes = Array.isArray(alignment?.character_end_times_seconds)
+        ? alignment.character_end_times_seconds
+        : [];
+    const alignmentText = characters.join('');
+    const segmentText = segments.map((segment) => segment.text).join('');
+
+    if (characters.length > 0 && startTimes.length >= characters.length && endTimes.length >= characters.length && alignmentText === segmentText) {
+        let charCursor = 0;
+        return segments.map((segment) => {
+            const charLength = Array.from(segment.text || '').length;
+            const startIndex = charCursor;
+            const endIndex = Math.max(startIndex, charCursor + charLength - 1);
+            charCursor += charLength;
+            const startTime = Number(startTimes[startIndex]) || 0;
+            const endTime = Number(endTimes[endIndex]) || startTime;
+            return { ...segment, startTime, endTime, duration: Math.max(0, endTime - startTime) };
+        });
+    }
+
+    const duration = Number(detail?.duration) || readAlignmentDuration(alignment);
+    return distributeSegmentsByTextLength(segments, duration);
+}
+
+function parseMotionValue(value) {
+    const text = typeof value === 'string' ? value : '';
+    if (!text || text === 'null') return null;
+    const separatorIndex = text.lastIndexOf(':');
+    if (separatorIndex < 0) return null;
+    const groupName = text.slice(0, separatorIndex);
+    const motionIndex = Number.parseInt(text.slice(separatorIndex + 1), 10);
+    if (!Number.isInteger(motionIndex) || motionIndex < 0) return null;
+    return { groupName, motionIndex };
+}
+
+function resolveMotionLabel(model, motionValue) {
+    const parsedMotion = parseMotionValue(motionValue);
+    if (!parsedMotion) return '';
+    const settings = model?.internalModel?.settings || {};
+    const definitions = settings.motions || model?.internalModel?.motionManager?.definitions || {};
+    const groupMotions = Array.isArray(definitions?.[parsedMotion.groupName]) ? definitions[parsedMotion.groupName] : [];
+    const motion = groupMotions[parsedMotion.motionIndex];
+    return getMotionLabel(motion, parsedMotion.motionIndex);
+}
+
+function resolveExpressionLabel(model, expressionValue) {
+    const expressionIndex = Number.parseInt(expressionValue, 10);
+    if (!Number.isInteger(expressionIndex)) return '';
+    const settings = model?.internalModel?.settings || {};
+    const source = settings.expressions || model?.internalModel?.motionManager?.expressionManager?.definitions || [];
+    const expressions = Array.isArray(source)
+        ? source
+        : source && typeof source === 'object'
+            ? Object.values(source).filter(Boolean)
+            : [];
+    return getExpressionLabel(expressions[expressionIndex], expressionIndex);
+}
+
+function resolveMappedCue(settings, segment) {
+    const emotionKey = typeof segment?.emotion === 'string' ? segment.emotion.trim() : '';
+    const actionKey = typeof segment?.action === 'string' ? segment.action.trim() : '';
+    const emotionMapping = emotionKey ? settings.emotionMappings?.[emotionKey] : null;
+    const actionMapping = actionKey && Array.isArray(settings.actionMappings)
+        ? settings.actionMappings.find((action) => action.description === actionKey)
+        : null;
+    const disabled = settings.disableSettings || {};
+    const priorityList = Array.isArray(settings.priorityList) ? settings.priorityList : [];
+    let motion = '';
+    let expression = '';
+
+    for (const item of priorityList.slice().sort((left, right) => right.priority - left.priority)) {
+        if (item.type === 'action' && item.target === 'motion' && !motion && !disabled.actionMotions) {
+            const candidate = actionMapping?.motion || '';
+            if (candidate && candidate !== 'null') motion = candidate;
+        }
+        if (item.type === 'emotion' && item.target === 'expression' && !expression && !disabled.emotionExpressions) {
+            const candidate = emotionMapping?.expression || '';
+            if (candidate) expression = candidate;
+        }
+        if (item.type === 'emotion' && item.target === 'motion' && !motion && !disabled.emotionMotions) {
+            const candidate = emotionMapping?.motion || '';
+            if (candidate && candidate !== 'null') motion = candidate;
+        }
+        if (item.type === 'action' && item.target === 'expression' && !expression && !disabled.actionExpressions) {
+            const candidate = actionMapping?.expression || '';
+            if (candidate) expression = candidate;
+        }
+    }
+
+    return { motion, expression };
+}
+
+function getMotionManager(model) {
+    return model?.internalModel?.motionManager || null;
+}
+
+function stopModelMotionsOnly(model) {
+    const motionManager = getMotionManager(model);
+    try { motionManager?._stopAllMotions?.(); } catch { /* noop */ }
+    try { motionManager?.queueManager?.stopAllMotions?.(); } catch { /* noop */ }
+    try { motionManager?.state?.reset?.(); } catch { /* noop */ }
+}
+
+function resetModelExpression(model) {
+    const expressionManager = model?.internalModel?.motionManager?.expressionManager;
+    if (typeof expressionManager?.resetExpression === 'function') {
+        try { expressionManager.resetExpression(); return; } catch { /* noop */ }
+    }
+    try { model?.expression?.(0); } catch { /* noop */ }
+}
+
+function resetDynamicState(model) {
+    stopModelMotionsOnly(model);
+    resetModelExpression(model);
+}
+
+async function startMotionWithoutInterruptingAudio(model, parsedMotion, options = {}) {
+    const motionManager = getMotionManager(model);
+    const shouldContinue = typeof options.shouldContinue === 'function' ? options.shouldContinue : () => true;
+    if (!motionManager || typeof motionManager.loadMotion !== 'function' || typeof motionManager._startMotion !== 'function') {
+        console.warn('[Live2D Dynamic] Motion manager cannot start a cue without interrupting audio.');
+        return false;
+    }
+
+    const definitions = motionManager.definitions || {};
+    const groupMotions = Array.isArray(definitions?.[parsedMotion.groupName]) ? definitions[parsedMotion.groupName] : [];
+    if (!groupMotions[parsedMotion.motionIndex]) {
+        console.warn('[Live2D Dynamic] Motion mapping points to an unavailable motion:', parsedMotion);
+        return false;
+    }
+
+    if (!shouldContinue()) return false;
+
+    try {
+        stopModelMotionsOnly(model);
+        if (!shouldContinue()) return false;
+        if (typeof motionManager.state?.reserve === 'function') {
+            const reserved = motionManager.state.reserve(parsedMotion.groupName, parsedMotion.motionIndex, LIVE2D_MOTION_PRIORITY_FORCE);
+            if (!reserved) return false;
+        }
+
+        const motion = await motionManager.loadMotion(parsedMotion.groupName, parsedMotion.motionIndex);
+        if (!motion || !shouldContinue()) return false;
+
+        if (typeof motionManager.state?.start === 'function') {
+            const started = motionManager.state.start(motion, parsedMotion.groupName, parsedMotion.motionIndex, LIVE2D_MOTION_PRIORITY_FORCE);
+            if (!started) return false;
+        }
+
+        motionManager.playing = true;
+        try { motionManager.emit?.('motionStart', parsedMotion.groupName, parsedMotion.motionIndex, null); } catch { /* noop */ }
+        motionManager._startMotion(motion);
+        return true;
+    } catch (error) {
+        console.error('[Live2D Dynamic] Motion failed:', error);
+        return false;
+    }
+}
+
+async function applyDynamicCue(model, settings, segment, options = {}) {
+    if (!model) return null;
+    const { motion, expression } = resolveMappedCue(settings, segment);
+    const cue = {
+        emotion: segment?.emotion || '',
+        action: segment?.action || null,
+        text: segment?.text || '',
+        motion,
+        motionLabel: resolveMotionLabel(model, motion),
+        expression,
+        expressionLabel: resolveExpressionLabel(model, expression),
+        appliedMotion: false,
+        appliedExpression: false,
+    };
+
+    if (expression !== '') {
+        const expressionIndex = Number.parseInt(expression, 10);
+        if (Number.isInteger(expressionIndex)) {
+            try {
+                const result = model.expression?.(expressionIndex);
+                cue.appliedExpression = await Promise.resolve(result).then((value) => value !== false);
+            } catch (error) {
+                console.error('[Live2D Dynamic] Expression failed:', error);
+            }
+        }
+    }
+
+    const parsedMotion = parseMotionValue(motion);
+    if (parsedMotion) {
+        cue.appliedMotion = await startMotionWithoutInterruptingAudio(model, parsedMotion, options);
+    }
+
+    return cue;
+}
+
+async function decodePlaybackBlob(blob) {
+    const arrayBuffer = await blob.arrayBuffer();
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) throw new Error('Web Audio API is not available.');
+    const ctx = new AudioCtx();
+    try {
+        return await ctx.decodeAudioData(arrayBuffer.slice(0));
+    } finally {
+        try { ctx.close(); } catch { /* noop */ }
+    }
+}
+
+function audioBufferToWavBlob(audioBuffer) {
+    const numChannels = audioBuffer.numberOfChannels;
+    const sampleRate = audioBuffer.sampleRate;
+    const length = audioBuffer.length * numChannels * 2 + 44;
+    const buffer = new ArrayBuffer(length);
+    const view = new DataView(buffer);
+    let pos = 0;
+
+    function setUint16(value) { view.setUint16(pos, value, true); pos += 2; }
+    function setUint32(value) { view.setUint32(pos, value, true); pos += 4; }
+
+    setUint32(0x46464952);
+    setUint32(length - 8);
+    setUint32(0x45564157);
+    setUint32(0x20746d66);
+    setUint32(16);
+    setUint16(1);
+    setUint16(numChannels);
+    setUint32(sampleRate);
+    setUint32(sampleRate * 2 * numChannels);
+    setUint16(numChannels * 2);
+    setUint16(16);
+    setUint32(0x61746164);
+    setUint32(length - pos - 4);
+
+    const channels = [];
+    for (let channel = 0; channel < numChannels; channel += 1) channels.push(audioBuffer.getChannelData(channel));
+
+    let offset = 0;
+    while (pos < length) {
+        for (let channel = 0; channel < numChannels; channel += 1) {
+            let sample = Math.max(-1, Math.min(1, channels[channel][offset] || 0));
+            sample = (sample < 0 ? sample * 32768 : sample * 32767) | 0;
+            view.setInt16(pos, sample, true);
+            pos += 2;
+        }
+        offset += 1;
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function sliceAudioBufferToWavBlob(audioBuffer, startTime, endTime) {
+    const sampleRate = audioBuffer.sampleRate;
+    const totalFrames = audioBuffer.length;
+    const startFrame = Math.max(0, Math.min(totalFrames, Math.floor(Number(startTime) * sampleRate)));
+    const endFrame = Math.max(startFrame, Math.min(totalFrames, Math.ceil(Number(endTime) * sampleRate)));
+    const frameCount = endFrame - startFrame;
+    if (frameCount <= 0) return null;
+
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    const ctx = new AudioCtx();
+    try {
+        const part = ctx.createBuffer(audioBuffer.numberOfChannels, frameCount, sampleRate);
+        for (let channel = 0; channel < audioBuffer.numberOfChannels; channel += 1) {
+            const src = audioBuffer.getChannelData(channel);
+            const dst = part.getChannelData(channel);
+            for (let sample = 0; sample < frameCount; sample += 1) dst[sample] = src[startFrame + sample] || 0;
+        }
+        return audioBufferToWavBlob(part);
+    } finally {
+        try { ctx.close(); } catch { /* noop */ }
+    }
+}
+
+async function buildSegmentAudioUrls(blobUrl, timeline) {
+    if (!blobUrl || !Array.isArray(timeline) || timeline.length === 0) return [];
+    const response = await fetch(blobUrl);
+    const blob = await response.blob();
+    const audioBuffer = await decodePlaybackBlob(blob);
+    const totalDuration = audioBuffer.duration;
+
+    return timeline.map((segment, index) => {
+        const rawStart = Number(segment.startTime);
+        const rawEnd = Number(segment.endTime);
+        const start = Number.isFinite(rawStart) ? Math.max(0, rawStart) : 0;
+        const isLast = index === timeline.length - 1;
+        let end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : totalDuration;
+        if (isLast) end = totalDuration;
+        const wavBlob = sliceAudioBufferToWavBlob(audioBuffer, start, end);
+        if (!wavBlob) return { segment, url: null, start, end };
+        return { segment, url: URL.createObjectURL(wavBlob), start, end };
+    });
+}
+
+function normalizeRuntimeMotions(source) {
+    const motions = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+    return Object.fromEntries(
+        Object.entries(motions)
+            .map(([groupName, groupMotions]) => [groupName, Array.isArray(groupMotions) ? groupMotions : []])
+            .filter(([, groupMotions]) => groupMotions.length > 0)
+    );
+}
+
+function normalizeRuntimeExpressions(source) {
+    if (Array.isArray(source)) return source;
+    if (Array.isArray(source?.definitions)) return source.definitions;
+    if (source && typeof source === 'object') return Object.values(source).filter(Boolean);
+    return [];
+}
+
+function readRuntimeModelInfo(model) {
+    const internalSettings = model?.internalModel?.settings || {};
+    return {
+        name: internalSettings.name || 'Active Model',
+        motions: normalizeRuntimeMotions(internalSettings.motions || model?.internalModel?.motionManager?.definitions),
+        expressions: normalizeRuntimeExpressions(
+            internalSettings.expressions || model?.internalModel?.motionManager?.expressionManager?.definitions
+        ),
+    };
+}
+
+function dispatchRuntimeModelInfo(model) {
+    if (typeof window === 'undefined') return;
+    const detail = readRuntimeModelInfo(model);
+    window.live2dPlusModelInfo = detail;
+    window.dispatchEvent(new CustomEvent(LIVE2D_MODEL_INFO_EVENT, { detail }));
+    console.log('[Live2D+] Runtime model info:', detail);
+}
+
 // ---------------------------------------------------------------------------
 // Live2D Canvas — rendered as a portal to document.body
 // ---------------------------------------------------------------------------
@@ -193,8 +876,20 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     const modelRef = useRef(null);
     const rendererRef = useRef(null);
     const dragStateRef = useRef(null);
+    const activeLipsyncRef = useRef(null);
     const [status, setStatus] = useState({ state: 'loading', message: 'Initializing...' });
     const [pos, setPos] = useState({ x: settings.positionX, y: settings.positionY });
+
+    const resetModelStateAfterPlayback = useCallback((model = modelRef.current) => {
+        if (!model || settings.resetExpressionAfterPlayback === false) return;
+        resetDynamicState(model);
+    }, [settings.resetExpressionAfterPlayback]);
+
+    const stopActiveLipsync = useCallback(() => {
+        activeLipsyncRef.current?.stop?.();
+        activeLipsyncRef.current = null;
+        resetModelStateAfterPlayback();
+    }, [resetModelStateAfterPlayback]);
 
     // Sync position from settings when not dragging
     useEffect(() => {
@@ -286,6 +981,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                     applyModelInteraction(model, settings);
                     applyFilters(settings);
                     window.live2dPlusModel = model;
+                    dispatchRuntimeModelInfo(model);
                     setStatus({ state: 'ready', message: 'Ready' });
                 });
 
@@ -347,6 +1043,147 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     useEffect(() => {
         if (modelRef.current) modelRef.current.alpha = settings.opacity;
     }, [settings.opacity]);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return undefined;
+
+        const handleDynamicTimestampsReady = (event) => {
+            const detail = event.detail || {};
+            console.log('[Live2D+ Dynamic] Event received:', {
+                routeTtsToLive2D: settings.routeTtsToLive2D,
+                dynamicMode: settings.dynamicMode,
+                hasBlobUrl: !!detail.blobUrl,
+                text: detail.text || '',
+                segments: detail.segments || [],
+                approximate: detail.approximate === true,
+            });
+
+            if (!settings.routeTtsToLive2D || !detail.blobUrl) return;
+
+            const model = modelRef.current;
+            if (!model?.speak) {
+                console.warn('[Live2D+ Dynamic] Model is not ready for playback.');
+                return;
+            }
+
+            detail.accepted = true;
+
+            stopActiveLipsync();
+
+            let settled = false;
+            const segmentUrls = [];
+            const timeline = calculatePlaybackTimeline(detail, settings);
+            const releaseSegmentUrls = () => {
+                while (segmentUrls.length) {
+                    const url = segmentUrls.pop();
+                    if (url) {
+                        try { URL.revokeObjectURL(url); } catch { /* noop */ }
+                    }
+                }
+            };
+            const cleanup = ({ reset = false } = {}) => {
+                if (reset) resetModelStateAfterPlayback(model);
+                releaseSegmentUrls();
+                if (detail.blobUrl) {
+                    try { URL.revokeObjectURL(detail.blobUrl); } catch { /* noop */ }
+                    detail.blobUrl = '';
+                }
+                if (activeLipsyncRef.current?.finish === finish) activeLipsyncRef.current = null;
+            };
+            const finish = () => {
+                if (settled) return;
+                console.log('[Live2D+ Dynamic] Playback finished.');
+                settled = true;
+                cleanup({ reset: true });
+                detail.resolve?.();
+            };
+            const fail = (error) => {
+                if (settled) return;
+                console.error('[Live2D+ Dynamic] Playback failed:', error);
+                settled = true;
+                cleanup({ reset: true });
+                detail.reject?.(error);
+            };
+            const stop = () => {
+                if (settled) return;
+                console.log('[Live2D+ Dynamic] Playback stopped.');
+                try { model.stopSpeaking?.(); } catch { /* noop */ }
+                finish();
+            };
+
+            activeLipsyncRef.current = { finish, fail, stop };
+            console.log('[Live2D+ Dynamic] Playback timeline:', timeline);
+
+            const playSegmentsSequentially = async () => {
+                const sliced = await buildSegmentAudioUrls(detail.blobUrl, timeline);
+                if (settled) return;
+                for (const item of sliced) {
+                    if (item?.url) segmentUrls.push(item.url);
+                }
+
+                for (let index = 0; index < sliced.length; index += 1) {
+                    if (settled) return;
+                    const { segment, url, start, end } = sliced[index];
+                    console.log(`[Live2D+ Dynamic] Playing segment ${index + 1}/${sliced.length}:`, {
+                        emotion: segment?.emotion || '',
+                        action: segment?.action || null,
+                        start,
+                        end,
+                        text: segment?.text || '',
+                        hasAudio: !!url,
+                    });
+
+                    applyDynamicCue(model, settings, segment, { shouldContinue: () => !settled })
+                        .then((cue) => {
+                            if (!settled) console.log('[Live2D+ Dynamic] Applied cue:', { segment, cue });
+                        })
+                        .catch((error) => console.error('[Live2D+ Dynamic] Cue application failed:', error));
+
+                    if (!url) continue;
+
+                    await new Promise((resolveSegment) => {
+                        try { model.stopSpeaking?.(); } catch { /* noop */ }
+                        try {
+                            const result = model.speak(url, {
+                                volume: 0.7,
+                                crossOrigin: 'anonymous',
+                                onFinish: () => {
+                                    console.log(`[Live2D+ Dynamic] Segment ${index + 1} finished.`);
+                                    resolveSegment();
+                                },
+                                onError: (error) => {
+                                    console.error(`[Live2D+ Dynamic] Segment ${index + 1} error:`, error);
+                                    resolveSegment();
+                                },
+                            });
+
+                            Promise.resolve(result)
+                                .then((started) => {
+                                    if (started === false) {
+                                        console.warn(`[Live2D+ Dynamic] Segment ${index + 1} rejected by model.speak.`);
+                                        resolveSegment();
+                                    }
+                                })
+                                .catch((error) => {
+                                    console.error(`[Live2D+ Dynamic] Segment ${index + 1} start failed:`, error);
+                                    resolveSegment();
+                                });
+                        } catch (error) {
+                            console.error(`[Live2D+ Dynamic] Segment ${index + 1} threw:`, error);
+                            resolveSegment();
+                        }
+                    });
+                }
+
+                if (!settled) finish();
+            };
+
+            playSegmentsSequentially().catch(fail);
+        };
+
+        window.addEventListener(TTS_DYNAMIC_TIMESTAMPS_READY_EVENT, handleDynamicTimestampsReady);
+        return () => window.removeEventListener(TTS_DYNAMIC_TIMESTAMPS_READY_EVENT, handleDynamicTimestampsReady);
+    }, [settings, resetModelStateAfterPlayback, stopActiveLipsync]);
 
     // Drag handlers
     const onPointerDown = useCallback((e) => {
@@ -481,8 +1318,9 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
 
     return (
         <>
+            <style>{LIVE2D_PLUS_SETTINGS_STYLES}</style>
             {/* ── Main settings drawer ── */}
-            <div className="inline-drawer">
+            <div className="inline-drawer live2d-plus-settings">
                 <div className="inline-drawer-toggle inline-drawer-header">
                     <b>Live2D+</b>
                     <div className="inline-drawer-icon fa-solid fa-circle-chevron-down down" />
@@ -563,6 +1401,8 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
                             You must load a model before TTS audio can be transcribed.
                         </small>
                     </SubDrawer>
+
+                    <DynamicSettingsSection settings={s} onChange={set} />
 
                     {/* ── Model ── */}
                     <SubDrawer title="Model">

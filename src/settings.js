@@ -2,6 +2,8 @@
 // Extension settings: defaults, normalization, helpers
 // ---------------------------------------------------------------------------
 
+import { DEFAULT_ANALYSIS_MODEL, DEFAULT_EMOTION_LABELS } from './dynamicAnalysis';
+
 export const SETTINGS_KEY = 'live2dplus';
 
 export const DEFAULT_MODEL_URL =
@@ -29,13 +31,39 @@ export const DEFAULT_FILTER_PARAMS = Object.freeze({
     alpha: { alpha: 0.8 },
 });
 
+export const DEFAULT_PRIORITY_LIST = Object.freeze([
+    { priority: 4, type: 'action', target: 'motion', label: 'Action Motions' },
+    { priority: 3, type: 'emotion', target: 'expression', label: 'Emotion Expressions' },
+    { priority: 2, type: 'emotion', target: 'motion', label: 'Emotion Motions' },
+    { priority: 1, type: 'action', target: 'expression', label: 'Action Expressions' },
+]);
+
+export const DEFAULT_DISABLE_SETTINGS = Object.freeze({
+    emotionMotions: false,
+    emotionExpressions: false,
+    actionMotions: false,
+    actionExpressions: false,
+});
+
 export const DEFAULT_SETTINGS = Object.freeze({
     enabled: false,
     followCursor: true,
     draggable: true,
     enableHitTesting: true,
     sttEnabled: false,
+    routeTtsToLive2D: true,
+    blockOriginalTtsPlayback: true,
+    dynamicMode: false,
+    resetExpressionAfterPlayback: true,
     voskModelUrl: '',
+    analysisBaseUrl: '',
+    analysisApiKey: '',
+    analysisModel: DEFAULT_ANALYSIS_MODEL,
+    emotionLabels: DEFAULT_EMOTION_LABELS,
+    emotionMappings: {},
+    actionMappings: [],
+    priorityList: DEFAULT_PRIORITY_LIST,
+    disableSettings: DEFAULT_DISABLE_SETTINGS,
     modelSource: MODEL_SOURCES.DEFAULT,
     customModelUrl: '',
     localModelPath: '',
@@ -67,6 +95,97 @@ function bool(value, fallback = false) {
     return typeof value === 'boolean' ? value : fallback;
 }
 
+function text(value) {
+    return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeLabelList(values, fallback = []) {
+    const list = Array.isArray(values) ? values : fallback;
+    const seen = new Set();
+    const labels = [];
+    for (const value of list) {
+        const label = text(value);
+        const key = label.toLowerCase();
+        if (!label || seen.has(key)) continue;
+        seen.add(key);
+        labels.push(label);
+    }
+    return labels.length ? labels : [...fallback];
+}
+
+function normalizeMappingEntry(value) {
+    if (typeof value === 'string') return { motion: text(value), expression: '' };
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    return {
+        motion: text(source.motion),
+        expression: text(source.expression),
+    };
+}
+
+function normalizeEmotionMappings(source = {}) {
+    const mappings = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+    const normalized = {};
+    for (const [rawKey, rawEntry] of Object.entries(mappings)) {
+        const key = text(rawKey);
+        if (!key) continue;
+        const entry = normalizeMappingEntry(rawEntry);
+        if (entry.motion || entry.expression) normalized[key] = entry;
+    }
+    return normalized;
+}
+
+function normalizeActionMappings(source = []) {
+    const actions = Array.isArray(source) ? source : [];
+    return actions.map((action, index) => {
+        const entry = action && typeof action === 'object' && !Array.isArray(action) ? action : {};
+        return {
+            id: text(entry.id) || `action-${index + 1}`,
+            description: text(entry.description),
+            motion: text(entry.motion),
+            expression: text(entry.expression),
+        };
+    });
+}
+
+function normalizePriorityList(source = []) {
+    const defaultsByKey = new Map(DEFAULT_PRIORITY_LIST.map((item) => [`${item.type}:${item.target}`, item]));
+    const input = Array.isArray(source) ? source : [];
+    const ordered = [];
+    const seen = new Set();
+
+    input
+        .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+        .slice()
+        .sort((left, right) => Number(right.priority || 0) - Number(left.priority || 0))
+        .forEach((item) => {
+            const type = item.type === 'action' ? 'action' : item.type === 'emotion' ? 'emotion' : '';
+            const target = item.target === 'motion' ? 'motion' : item.target === 'expression' ? 'expression' : '';
+            const key = `${type}:${target}`;
+            const defaults = defaultsByKey.get(key);
+            if (!defaults || seen.has(key)) return;
+            seen.add(key);
+            ordered.push({ ...defaults, label: text(item.label) || defaults.label });
+        });
+
+    for (const item of DEFAULT_PRIORITY_LIST) {
+        const key = `${item.type}:${item.target}`;
+        if (!seen.has(key)) ordered.push({ ...item });
+    }
+
+    const count = ordered.length;
+    return ordered.map((item, index) => ({ ...item, priority: count - index }));
+}
+
+function normalizeDisableSettings(source = {}) {
+    const settings = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+    return {
+        emotionMotions: bool(settings.emotionMotions, DEFAULT_DISABLE_SETTINGS.emotionMotions),
+        emotionExpressions: bool(settings.emotionExpressions, DEFAULT_DISABLE_SETTINGS.emotionExpressions),
+        actionMotions: bool(settings.actionMotions, DEFAULT_DISABLE_SETTINGS.actionMotions),
+        actionExpressions: bool(settings.actionExpressions, DEFAULT_DISABLE_SETTINGS.actionExpressions),
+    };
+}
+
 export function normalizeSettings(input = {}) {
     const src = input && typeof input === 'object' ? input : {};
     const filters = src.filters && typeof src.filters === 'object' ? src.filters : {};
@@ -83,7 +202,19 @@ export function normalizeSettings(input = {}) {
         draggable: bool(src.draggable, DEFAULT_SETTINGS.draggable),
         enableHitTesting: bool(src.enableHitTesting, DEFAULT_SETTINGS.enableHitTesting),
         sttEnabled: bool(src.sttEnabled, DEFAULT_SETTINGS.sttEnabled),
+        routeTtsToLive2D: bool(src.routeTtsToLive2D, DEFAULT_SETTINGS.routeTtsToLive2D),
+        blockOriginalTtsPlayback: bool(src.blockOriginalTtsPlayback, DEFAULT_SETTINGS.blockOriginalTtsPlayback),
+        dynamicMode: bool(src.dynamicMode, DEFAULT_SETTINGS.dynamicMode),
+        resetExpressionAfterPlayback: bool(src.resetExpressionAfterPlayback, DEFAULT_SETTINGS.resetExpressionAfterPlayback),
         voskModelUrl: typeof src.voskModelUrl === 'string' ? src.voskModelUrl : '',
+        analysisBaseUrl: text(src.analysisBaseUrl),
+        analysisApiKey: typeof src.analysisApiKey === 'string' ? src.analysisApiKey : '',
+        analysisModel: text(src.analysisModel) || DEFAULT_ANALYSIS_MODEL,
+        emotionLabels: normalizeLabelList(src.emotionLabels, DEFAULT_EMOTION_LABELS),
+        emotionMappings: normalizeEmotionMappings(src.emotionMappings),
+        actionMappings: normalizeActionMappings(src.actionMappings),
+        priorityList: normalizePriorityList(src.priorityList),
+        disableSettings: normalizeDisableSettings(src.disableSettings),
         modelSource: Object.values(MODEL_SOURCES).includes(src.modelSource)
             ? src.modelSource
             : DEFAULT_SETTINGS.modelSource,

@@ -36,10 +36,12 @@ import {
     // sees the latest toggle/model values.
     const getModelUrl = () =>
         extensionSettings[SETTINGS_KEY]?.voskModelUrl?.trim() || DEFAULT_VOSK_MODEL_URL;
+    const getSettings = () => normalizeSettings(extensionSettings[SETTINGS_KEY]);
 
     setupSttPipeline({
         isEnabled: () => extensionSettings[SETTINGS_KEY]?.sttEnabled === true,
         getModelUrl,
+        getSettings,
     });
 
     // Mount React into extensions_settings panel

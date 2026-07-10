@@ -11,6 +11,7 @@
 // want to trigger it implicitly from an incoming TTS event.
 // ---------------------------------------------------------------------------
 import * as Vosk from 'vosk-browser';
+import { analyzeDynamicText, createNeutralDynamicSegments } from './dynamicAnalysis';
 
 const MODULE = 'Live2D+ STT';
 
@@ -54,6 +55,7 @@ const VOSK_LOG_LEVEL = -1;
 const CHUNK_SECONDS = 0.25;
 const FINAL_RESULT_TIMEOUT_MS = 15000;
 const FINAL_RESULT_SETTLE_MS = 250;
+const URL_REVOKE_FALLBACK_MS = 120000;
 
 // ---------------------------------------------------------------------------
 // Model state (manual load required)
@@ -512,6 +514,24 @@ async function transcribeBlob(blob) {
 // ---------------------------------------------------------------------------
 
 let pipelineInstalled = false;
+let playbackInterceptorInstalled = false;
+let shouldBlockNativePlayback = () => false;
+let originalAudioPlay = null;
+
+function installNativeTtsPlaybackBlocker() {
+    if (playbackInterceptorInstalled || typeof HTMLAudioElement === 'undefined') return;
+    playbackInterceptorInstalled = true;
+    originalAudioPlay = HTMLAudioElement.prototype.play;
+    HTMLAudioElement.prototype.play = function patchedLive2DPlusPlay() {
+        if (this?.id === 'tts_audio' && shouldBlockNativePlayback()) {
+            const el = this;
+            console.log(`[${MODULE}] Blocking SillyTavern native TTS playback; routing audio through Live2D.`);
+            Promise.resolve().then(() => el.dispatchEvent(new Event('ended')));
+            return Promise.resolve();
+        }
+        return originalAudioPlay.apply(this, arguments);
+    };
+}
 
 async function resolveAudioBlob(audio) {
     if (audio instanceof Blob) return audio;
@@ -523,6 +543,17 @@ async function resolveAudioBlob(audio) {
         return response.blob();
     }
     return null;
+}
+
+async function readBlobDuration(blob) {
+    try {
+        const audioBuffer = await decodeAudioBlob(blob);
+        const duration = Number(audioBuffer?.duration);
+        return Number.isFinite(duration) && duration > 0 ? duration : 0;
+    } catch (error) {
+        console.warn(`[${MODULE}] Could not read audio duration for approximate alignment:`, error);
+        return 0;
+    }
 }
 
 function logTimestamps(characterName, text, words, alignment, duration) {
@@ -546,24 +577,53 @@ function logTimestamps(characterName, text, words, alignment, duration) {
 // Event name used by Dustpan so external lip-sync consumers can pick this up.
 const TTS_DYNAMIC_TIMESTAMPS_READY_EVENT = 'TTSDynamicTimestampsReady';
 
-function dispatchTimestamps(characterName, text, words, alignment, duration) {
-    if (typeof window === 'undefined') return;
-    try {
-        window.dispatchEvent(new CustomEvent(TTS_DYNAMIC_TIMESTAMPS_READY_EVENT, {
-            detail: {
-                provider: MODULE,
-                characterName,
-                text,
-                words,
-                alignment,
-                normalizedAlignment: alignment,
-                approximate: alignment?.approximate === true,
-                duration,
+function dispatchTimestamps({ characterName, text, words, alignment, duration, blobUrl, analysis, segments }) {
+    if (typeof window === 'undefined') return Promise.resolve(false);
+    return new Promise((resolve) => {
+        let settled = false;
+        let fallbackTimer = 0;
+        const settle = (accepted) => {
+            if (settled) return;
+            settled = true;
+            if (fallbackTimer) window.clearTimeout(fallbackTimer);
+            resolve(accepted === true);
+        };
+        const detail = {
+            accepted: false,
+            provider: MODULE,
+            characterName,
+            text,
+            words,
+            blobUrl,
+            timestamps: alignment,
+            alignment,
+            normalizedAlignment: alignment,
+            approximate: alignment?.approximate === true,
+            duration,
+            segments,
+            analysisModel: analysis?.model || null,
+            analysisSource: analysis?.source || null,
+            analysisTemperature: analysis?.temperature ?? null,
+            rawAnalysisText: analysis?.rawResponseText || '',
+            parsedAnalysis: analysis?.parsed || null,
+            analysisError: analysis?.error || null,
+            analysisSkipped: analysis?.skipped === true,
+            resolve: () => settle(true),
+            reject: (error) => {
+                if (error) console.error(`[${MODULE}] Live2D dynamic playback rejected:`, error);
+                settle(true);
             },
-        }));
-    } catch (err) {
-        console.error(`[${MODULE}] Failed to dispatch timestamp event:`, err);
-    }
+        };
+
+        try {
+            window.dispatchEvent(new CustomEvent(TTS_DYNAMIC_TIMESTAMPS_READY_EVENT, { detail }));
+            if (!detail.accepted) settle(false);
+            else if (!settled) fallbackTimer = window.setTimeout(() => settle(true), URL_REVOKE_FALLBACK_MS);
+        } catch (err) {
+            console.error(`[${MODULE}] Failed to dispatch timestamp event:`, err);
+            settle(false);
+        }
+    });
 }
 
 /**
@@ -571,10 +631,20 @@ function dispatchTimestamps(characterName, text, words, alignment, duration) {
  * @param {object} opts
  * @param {() => boolean} opts.isEnabled  Live read of the STT enabled toggle.
  * @param {() => string}  opts.getModelUrl Live read of the configured model URL.
+ * @param {() => object}  opts.getSettings Live read of all Live2D+ settings.
  */
-export function setupSttPipeline({ isEnabled, getModelUrl } = {}) {
+export function setupSttPipeline({ isEnabled, getModelUrl, getSettings } = {}) {
     if (pipelineInstalled) return;
     pipelineInstalled = true;
+
+    installNativeTtsPlaybackBlocker();
+    shouldBlockNativePlayback = () => {
+        const settings = typeof getSettings === 'function' ? getSettings() : {};
+        return settings.enabled === true
+            && settings.routeTtsToLive2D === true
+            && settings.blockOriginalTtsPlayback === true
+            && !!window.live2dPlusModel?.speak;
+    };
 
     const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null;
     if (!ctx) {
@@ -594,18 +664,16 @@ export function setupSttPipeline({ isEnabled, getModelUrl } = {}) {
     eventSource.on(readyEvent, async ({ audio, text, characterName } = {}) => {
         console.log(`[${MODULE}] TTS_AUDIO_READY fired for character="${characterName || ''}", audio type=`, typeof audio, audio);
 
-        if (typeof isEnabled === 'function' && !isEnabled()) {
+        const settings = typeof getSettings === 'function' ? getSettings() : {};
+        const sttEnabled = typeof isEnabled === 'function' ? isEnabled() : settings.sttEnabled === true;
+        const routeToLive2D = settings.enabled === true && settings.routeTtsToLive2D === true;
+
+        if (!sttEnabled && !routeToLive2D) {
             console.log(`[${MODULE}] STT is disabled in settings; skipping transcription.`);
             return;
         }
 
-        // The model must be loaded manually beforehand.
-        if (!isSttModelReady()) {
-            console.warn(`[${MODULE}] TTS audio intercepted but no Vosk model is loaded. ` +
-                'Load a model in the Live2D+ settings first.');
-            return;
-        }
-
+        let blobUrl = '';
         try {
             const blob = await resolveAudioBlob(audio);
             if (!blob) {
@@ -614,11 +682,52 @@ export function setupSttPipeline({ isEnabled, getModelUrl } = {}) {
             }
             console.log(`[${MODULE}] Resolved TTS audio to blob: type=${blob.type}, size=${blob.size} bytes`);
 
-            const result = await transcribeBlob(blob);
-            logTimestamps(characterName, result.text || text || '', result.words, result.alignment, result.duration);
-            dispatchTimestamps(characterName, result.text || text || '', result.words, result.alignment, result.duration);
+            blobUrl = URL.createObjectURL(blob);
+            let result;
+            if (sttEnabled && isSttModelReady()) {
+                result = await transcribeBlob(blob);
+            } else {
+                if (sttEnabled) {
+                    console.warn(`[${MODULE}] TTS audio intercepted but no Vosk model is loaded. ` +
+                        'Using approximate timing for Live2D playback.');
+                }
+                const duration = await readBlobDuration(blob);
+                const fallbackText = typeof text === 'string' ? text : '';
+                result = {
+                    text: fallbackText,
+                    words: [],
+                    alignment: createApproximateAlignment(fallbackText, duration),
+                    sampleRate: null,
+                    duration,
+                };
+            }
+
+            const finalText = result.text || text || '';
+            const analysis = settings.dynamicMode === true
+                ? await analyzeDynamicText(finalText, settings)
+                : { segments: createNeutralDynamicSegments(finalText, settings), skipped: true };
+            const segments = Array.isArray(analysis?.segments) && analysis.segments.length
+                ? analysis.segments
+                : createNeutralDynamicSegments(finalText, settings);
+
+            logTimestamps(characterName, finalText, result.words, result.alignment, result.duration);
+            const accepted = await dispatchTimestamps({
+                characterName,
+                text: finalText,
+                words: result.words,
+                alignment: result.alignment,
+                duration: result.duration,
+                blobUrl,
+                analysis,
+                segments,
+            });
+            if (!accepted && blobUrl) {
+                URL.revokeObjectURL(blobUrl);
+                blobUrl = '';
+            }
         } catch (error) {
             console.error(`[${MODULE}] Failed to transcribe TTS audio:`, error);
+            if (blobUrl) URL.revokeObjectURL(blobUrl);
         }
     });
 
