@@ -31,72 +31,6 @@ const LIVE2D_RUNTIME_MODULES = [
 ];
 
 const SCRIPT_ATTR = 'data-live2dplus-src';
-const LIVE2D_ALLOWED_AUDIO_URLS_KEY = '__live2dPlusAllowedAudioUrls';
-const LIVE2D_SOUND_MANAGER_PATCHED_KEY = '__live2dPlusSoundManagerPatched';
-const mutedLive2DSoundElements = new WeakSet();
-
-function normalizeAudioUrl(url) {
-    const value = typeof url === 'string' ? url.trim() : '';
-    if (!value) return '';
-    try {
-        const anchor = document.createElement('a');
-        anchor.href = value;
-        return anchor.href;
-    } catch {
-        return value;
-    }
-}
-
-function getAllowedLive2DAudioUrls() {
-    if (typeof window === 'undefined') return null;
-    if (!(window[LIVE2D_ALLOWED_AUDIO_URLS_KEY] instanceof Set)) {
-        window[LIVE2D_ALLOWED_AUDIO_URLS_KEY] = new Set();
-    }
-    return window[LIVE2D_ALLOWED_AUDIO_URLS_KEY];
-}
-
-function isAllowedLive2DAudioUrl(url) {
-    const allowedUrls = getAllowedLive2DAudioUrls();
-    const normalized = normalizeAudioUrl(url);
-    return !!normalized && allowedUrls?.has(normalized);
-}
-
-function muteLive2DSoundElement(audio) {
-    if (!audio) return;
-    mutedLive2DSoundElements.add(audio);
-    try { audio.muted = true; } catch { /* noop */ }
-    try { audio.volume = 0; } catch { /* noop */ }
-}
-
-function installLive2DSoundMute(live2d) {
-    const soundManager = live2d?.SoundManager;
-    if (!soundManager || soundManager[LIVE2D_SOUND_MANAGER_PATCHED_KEY]) return;
-
-    const originalAdd = soundManager.add;
-    const originalPlay = soundManager.play;
-    if (typeof originalAdd !== 'function' || typeof originalPlay !== 'function') return;
-
-    soundManager.add = function patchedLive2DPlusSoundAdd(url, onFinish, onError, crossOrigin) {
-        const audio = originalAdd.call(this, url, onFinish, onError, crossOrigin);
-        if (!isAllowedLive2DAudioUrl(audio?.src || url)) {
-            muteLive2DSoundElement(audio);
-        }
-        return audio;
-    };
-
-    soundManager.play = function patchedLive2DPlusSoundPlay(audio) {
-        if (mutedLive2DSoundElements.has(audio)) {
-            muteLive2DSoundElement(audio);
-            Promise.resolve().then(() => {
-                try { audio.dispatchEvent(new Event('ended')); } catch { /* noop */ }
-            });
-            return Promise.resolve();
-        }
-        return originalPlay.apply(this, arguments);
-    };
-
-    Object.defineProperty(soundManager, LIVE2D_SOUND_MANAGER_PATCHED_KEY, { value: true });
-}
 
 // ---------------------------------------------------------------------------
 // Script loading
@@ -157,8 +91,13 @@ export async function loadLive2DRuntime() {
                 throw new Error(`Cubism 4 core failed to load from ${EXTENSION_WEB_PATH}/lib/live2dcubismcore.min.js`);
             }
 
+            // Mute motion/expression audio (models can bundle sound clips in their motions).
+            // We silence the sound manager globally so models don't play unexpected noises.
+            // The lipsync speak() path uses its own audio element and is unaffected.
             const live2d = window.PIXI?.live2d;
-            installLive2DSoundMute(live2d);
+            if (live2d?.SoundManager) {
+                live2d.SoundManager.volume = 0;
+            }
         })();
     }
 

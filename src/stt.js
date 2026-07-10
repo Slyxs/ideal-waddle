@@ -56,9 +56,6 @@ const CHUNK_SECONDS = 0.25;
 const FINAL_RESULT_TIMEOUT_MS = 15000;
 const FINAL_RESULT_SETTLE_MS = 250;
 const URL_REVOKE_FALLBACK_MS = 120000;
-const NATIVE_TTS_BLOCK_WINDOW_MS = 300000;
-const SILLYTAVERN_TTS_AUDIO_ID = 'tts_audio';
-const LIVE2D_ALLOWED_AUDIO_URLS_KEY = '__live2dPlusAllowedAudioUrls';
 
 // ---------------------------------------------------------------------------
 // Model state (manual load required)
@@ -512,107 +509,27 @@ async function transcribeBlob(blob) {
 //
 // SillyTavern emits TTS_AUDIO_READY with the raw audio (a Blob, or sometimes a
 // plain URL string) BEFORE it plays. We grab it there, transcribe it, and log
-// the word timestamps. When routed to Live2D, ST's own media element is muted,
-// stopped, and sent an 'ended' event so its queue keeps moving.
+// the word timestamps. We do NOT block ST's own playback — the audio still
+// plays normally; the lip-sync stage (later) will consume these timestamps.
 // ---------------------------------------------------------------------------
 
 let pipelineInstalled = false;
 let playbackInterceptorInstalled = false;
 let shouldBlockNativePlayback = () => false;
-let originalMediaPlay = null;
-let nativeTtsBlockUntil = 0;
-const mutedMediaState = new WeakMap();
-const nativeTtsSourceUrls = new Set();
-
-function normalizeMediaUrl(url) {
-    const value = typeof url === 'string' ? url.trim() : '';
-    if (!value) return '';
-    try {
-        const anchor = document.createElement('a');
-        anchor.href = value;
-        return anchor.href;
-    } catch {
-        return value;
-    }
-}
-
-function getAllowedLive2DAudioUrls() {
-    if (typeof window === 'undefined') return null;
-    if (!(window[LIVE2D_ALLOWED_AUDIO_URLS_KEY] instanceof Set)) {
-        window[LIVE2D_ALLOWED_AUDIO_URLS_KEY] = new Set();
-    }
-    return window[LIVE2D_ALLOWED_AUDIO_URLS_KEY];
-}
-
-function isAllowedLive2DAudioElement(element) {
-    const allowedUrls = getAllowedLive2DAudioUrls();
-    if (!allowedUrls) return false;
-    const src = normalizeMediaUrl(element?.currentSrc || element?.src || '');
-    return !!src && allowedUrls.has(src);
-}
-
-function markNativeTtsSource(audio) {
-    if (typeof audio !== 'string') return;
-    const src = normalizeMediaUrl(audio);
-    if (src) nativeTtsSourceUrls.add(src);
-}
-
-function startNativeTtsBlockWindow(audio) {
-    markNativeTtsSource(audio);
-    nativeTtsBlockUntil = Date.now() + NATIVE_TTS_BLOCK_WINDOW_MS;
-}
-
-function isNativeTtsAudioElement(element) {
-    if (!element || isAllowedLive2DAudioElement(element)) return false;
-    if (element.id === SILLYTAVERN_TTS_AUDIO_ID) return true;
-
-    const src = normalizeMediaUrl(element.currentSrc || element.src || '');
-    if (src && nativeTtsSourceUrls.has(src)) return true;
-
-    return Date.now() < nativeTtsBlockUntil;
-}
-
-function rememberMediaState(element) {
-    if (!element || mutedMediaState.has(element)) return;
-    mutedMediaState.set(element, {
-        muted: element.muted === true,
-        volume: Number.isFinite(Number(element.volume)) ? Number(element.volume) : 1,
-    });
-}
-
-function restoreMediaState(element) {
-    const state = mutedMediaState.get(element);
-    if (!state) return;
-    try { element.muted = state.muted; } catch { /* noop */ }
-    try { element.volume = state.volume; } catch { /* noop */ }
-    mutedMediaState.delete(element);
-}
-
-function muteNativeTtsMediaElement(element) {
-    const hadState = mutedMediaState.has(element);
-    rememberMediaState(element);
-    try { element.muted = true; } catch { /* noop */ }
-    try { element.volume = 0; } catch { /* noop */ }
-    if (!hadState) {
-        element.addEventListener('ended', () => restoreMediaState(element), { once: true });
-        element.addEventListener('emptied', () => restoreMediaState(element), { once: true });
-    }
-}
+let originalAudioPlay = null;
 
 function installNativeTtsPlaybackBlocker() {
-    const MediaElement = typeof HTMLMediaElement !== 'undefined'
-        ? HTMLMediaElement
-        : (typeof HTMLAudioElement !== 'undefined' ? HTMLAudioElement : null);
-    if (playbackInterceptorInstalled || !MediaElement) return;
+    if (playbackInterceptorInstalled || typeof HTMLAudioElement === 'undefined') return;
     playbackInterceptorInstalled = true;
-    originalMediaPlay = MediaElement.prototype.play;
-    MediaElement.prototype.play = function patchedLive2DPlusPlay() {
-        if (shouldBlockNativePlayback() && isNativeTtsAudioElement(this)) {
-            muteNativeTtsMediaElement(this);
-            return originalMediaPlay.apply(this, arguments);
+    originalAudioPlay = HTMLAudioElement.prototype.play;
+    HTMLAudioElement.prototype.play = function patchedLive2DPlusPlay() {
+        if (this?.id === 'tts_audio' && shouldBlockNativePlayback()) {
+            const el = this;
+            console.log(`[${MODULE}] Blocking SillyTavern native TTS playback; routing audio through Live2D.`);
+            Promise.resolve().then(() => el.dispatchEvent(new Event('ended')));
+            return Promise.resolve();
         }
-        if (this?.id === SILLYTAVERN_TTS_AUDIO_ID) restoreMediaState(this);
-        return originalMediaPlay.apply(this, arguments);
+        return originalAudioPlay.apply(this, arguments);
     };
 }
 
@@ -750,10 +667,6 @@ export function setupSttPipeline({ isEnabled, getModelUrl, getSettings } = {}) {
         const settings = typeof getSettings === 'function' ? getSettings() : {};
         const sttEnabled = typeof isEnabled === 'function' ? isEnabled() : settings.sttEnabled === true;
         const routeToLive2D = settings.enabled === true && settings.routeTtsToLive2D === true;
-
-        if (routeToLive2D && settings.blockOriginalTtsPlayback === true) {
-            startNativeTtsBlockWindow(audio);
-        }
 
         if (!sttEnabled && !routeToLive2D) {
             console.log(`[${MODULE}] STT is disabled in settings; skipping transcription.`);

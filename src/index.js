@@ -2,14 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
-import {
-    normalizeSettings,
-    pickModelSettings,
-    resolveEffectiveSettings,
-    resolveModelSettingsKey,
-    SETTINGS_KEY,
-    splitModelSettingsPatch,
-} from './settings';
+import { normalizeSettings, SETTINGS_KEY } from './settings';
 import {
     setupSttPipeline,
     loadSttModel,
@@ -43,7 +36,7 @@ import {
     // sees the latest toggle/model values.
     const getModelUrl = () =>
         extensionSettings[SETTINGS_KEY]?.voskModelUrl?.trim() || DEFAULT_VOSK_MODEL_URL;
-    const getSettings = () => resolveEffectiveSettings(extensionSettings[SETTINGS_KEY]);
+    const getSettings = () => normalizeSettings(extensionSettings[SETTINGS_KEY]);
 
     setupSttPipeline({
         isEnabled: () => extensionSettings[SETTINGS_KEY]?.sttEnabled === true,
@@ -72,42 +65,17 @@ import {
 
         function handleChange(patch) {
             setSettings((prev) => {
-                const current = normalizeSettings(prev);
-                const { modelPatch, globalPatch } = splitModelSettingsPatch(patch);
-                const modelPatchKeys = Object.keys(modelPatch);
-                let next = normalizeSettings({ ...current, ...globalPatch });
-
-                if (modelPatchKeys.length > 0) {
-                    const modelKey = resolveModelSettingsKey(current);
-                    const effectiveCurrent = resolveEffectiveSettings(current);
-                    const existingProfile = current.modelSettingsByKey?.[modelKey] || pickModelSettings(effectiveCurrent);
-                    const nextProfile = pickModelSettings({
-                        ...effectiveCurrent,
-                        ...existingProfile,
-                        ...modelPatch,
-                    });
-
-                    next = normalizeSettings({
-                        ...next,
-                        modelSettingsByKey: {
-                            ...next.modelSettingsByKey,
-                            [modelKey]: nextProfile,
-                        },
-                    });
-                }
-
+                const next = normalizeSettings({ ...prev, ...patch });
                 // Persist to ST's extension settings
-                extensionSettings[SETTINGS_KEY] = next;
+                Object.assign(extensionSettings[SETTINGS_KEY], next);
                 saveSettingsDebounced();
                 return next;
             });
         }
 
-        const effectiveSettings = resolveEffectiveSettings(settings);
-
         return (
             <App
-                settings={effectiveSettings}
+                settings={settings}
                 onChange={handleChange}
                 sttModel={sttModel}
                 onLoadSttModel={() => loadSttModel(getModelUrl())}
