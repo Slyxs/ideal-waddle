@@ -45,6 +45,28 @@ export const DEFAULT_DISABLE_SETTINGS = Object.freeze({
     actionExpressions: false,
 });
 
+export const PER_MODEL_SETTING_KEYS = Object.freeze([
+    'resetExpressionAfterPlayback',
+    'emotionLabels',
+    'emotionMappings',
+    'actionMappings',
+    'priorityList',
+    'disableSettings',
+    'canvasWidth',
+    'canvasHeight',
+    'scale',
+    'positionX',
+    'positionY',
+    'modelPositionX',
+    'modelPositionY',
+    'opacity',
+    'zIndex',
+    'filters',
+    'filterParams',
+]);
+
+const PER_MODEL_SETTING_KEY_SET = new Set(PER_MODEL_SETTING_KEYS);
+
 export const DEFAULT_SETTINGS = Object.freeze({
     enabled: false,
     followCursor: true,
@@ -79,6 +101,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     reloadKey: 0,
     filters: DEFAULT_FILTERS,
     filterParams: DEFAULT_FILTER_PARAMS,
+    modelSettingsByKey: {},
+    activeModelSettingsKey: '',
 });
 
 // ---------------------------------------------------------------------------
@@ -97,6 +121,25 @@ function bool(value, fallback = false) {
 
 function text(value) {
     return typeof value === 'string' ? value.trim() : '';
+}
+
+function cloneSettingValue(value) {
+    if (Array.isArray(value)) return value.map((item) => cloneSettingValue(item));
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneSettingValue(item)]));
+    }
+    return value;
+}
+
+function normalizeModelSettingsByKey(source = {}) {
+    const profiles = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+    const normalized = {};
+    for (const [rawKey, rawProfile] of Object.entries(profiles)) {
+        const key = text(rawKey);
+        if (!key || !rawProfile || typeof rawProfile !== 'object' || Array.isArray(rawProfile)) continue;
+        normalized[key] = cloneSettingValue(rawProfile);
+    }
+    return normalized;
 }
 
 function normalizeLabelList(values, fallback = []) {
@@ -230,6 +273,8 @@ export function normalizeSettings(input = {}) {
         opacity: clamp(src.opacity, 0, 1, DEFAULT_SETTINGS.opacity),
         zIndex: clamp(src.zIndex, 0, 9999, DEFAULT_SETTINGS.zIndex),
         reloadKey: Number.isInteger(src.reloadKey) ? src.reloadKey : 0,
+        modelSettingsByKey: normalizeModelSettingsByKey(src.modelSettingsByKey),
+        activeModelSettingsKey: text(src.activeModelSettingsKey),
         filters: {
             outline: bool(filters.outline, false),
             pixelate: bool(filters.pixelate, false),
@@ -261,6 +306,42 @@ export function normalizeSettings(input = {}) {
             },
         },
     };
+}
+
+export function resolveModelSettingsKey(settings) {
+    const normalized = normalizeSettings(settings);
+    return `${normalized.modelSource}:${resolveModelUrl(normalized) || 'unconfigured'}`;
+}
+
+export function resolveEffectiveSettings(settings = {}) {
+    const base = normalizeSettings(settings);
+    const modelKey = resolveModelSettingsKey(base);
+    const profile = base.modelSettingsByKey?.[modelKey];
+    if (!profile) return { ...base, activeModelSettingsKey: modelKey };
+    const effective = normalizeSettings({
+        ...base,
+        ...profile,
+        modelSettingsByKey: base.modelSettingsByKey,
+    });
+    return { ...effective, activeModelSettingsKey: modelKey };
+}
+
+export function pickModelSettings(settings = {}) {
+    const normalized = normalizeSettings(settings);
+    return Object.fromEntries(
+        PER_MODEL_SETTING_KEYS.map((key) => [key, cloneSettingValue(normalized[key])])
+    );
+}
+
+export function splitModelSettingsPatch(patch = {}) {
+    const source = patch && typeof patch === 'object' && !Array.isArray(patch) ? patch : {};
+    const modelPatch = {};
+    const globalPatch = {};
+    for (const [key, value] of Object.entries(source)) {
+        if (PER_MODEL_SETTING_KEY_SET.has(key)) modelPatch[key] = value;
+        else globalPatch[key] = value;
+    }
+    return { modelPatch, globalPatch };
 }
 
 export function resolveModelUrl(settings) {

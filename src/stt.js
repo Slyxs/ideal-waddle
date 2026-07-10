@@ -588,19 +588,15 @@ function restoreMediaState(element) {
     mutedMediaState.delete(element);
 }
 
-function stopNativeTtsMediaElement(element, reason = 'blocked') {
+function muteNativeTtsMediaElement(element) {
+    const hadState = mutedMediaState.has(element);
     rememberMediaState(element);
     try { element.muted = true; } catch { /* noop */ }
     try { element.volume = 0; } catch { /* noop */ }
-    try { element.pause?.(); } catch { /* noop */ }
-    try {
-        if (Number.isFinite(element.currentTime)) element.currentTime = 0;
-    } catch { /* noop */ }
-
-    console.log(`[${MODULE}] Prevented SillyTavern native TTS playback (${reason}).`);
-    Promise.resolve().then(() => {
-        try { element.dispatchEvent(new Event('ended')); } catch { /* noop */ }
-    });
+    if (!hadState) {
+        element.addEventListener('ended', () => restoreMediaState(element), { once: true });
+        element.addEventListener('emptied', () => restoreMediaState(element), { once: true });
+    }
 }
 
 function installNativeTtsPlaybackBlocker() {
@@ -612,8 +608,8 @@ function installNativeTtsPlaybackBlocker() {
     originalMediaPlay = MediaElement.prototype.play;
     MediaElement.prototype.play = function patchedLive2DPlusPlay() {
         if (shouldBlockNativePlayback() && isNativeTtsAudioElement(this)) {
-            stopNativeTtsMediaElement(this, 'play() guard');
-            return Promise.resolve();
+            muteNativeTtsMediaElement(this);
+            return originalMediaPlay.apply(this, arguments);
         }
         if (this?.id === SILLYTAVERN_TTS_AUDIO_ID) restoreMediaState(this);
         return originalMediaPlay.apply(this, arguments);
