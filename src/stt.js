@@ -56,7 +56,9 @@ const CHUNK_SECONDS = 0.25;
 const FINAL_RESULT_TIMEOUT_MS = 15000;
 const FINAL_RESULT_SETTLE_MS = 250;
 const URL_REVOKE_FALLBACK_MS = 120000;
-const NATIVE_TTS_BLOCK_WINDOW_MS = 180000;
+const NATIVE_TTS_BLOCK_WINDOW_MS = 300000;
+const SILLYTAVERN_TTS_AUDIO_ID = 'tts_audio';
+const LIVE2D_ALLOWED_AUDIO_URLS_KEY = '__live2dPlusAllowedAudioUrls';
 
 // ---------------------------------------------------------------------------
 // Model state (manual load required)
@@ -510,110 +512,112 @@ async function transcribeBlob(blob) {
 //
 // SillyTavern emits TTS_AUDIO_READY with the raw audio (a Blob, or sometimes a
 // plain URL string) BEFORE it plays. We grab it there, transcribe it, and log
-// the word timestamps. When routing is enabled, we also suppress ST's own audio
-// element so Live2D is the only playback path.
+// the word timestamps. When routed to Live2D, ST's own media element is muted,
+// stopped, and sent an 'ended' event so its queue keeps moving.
 // ---------------------------------------------------------------------------
 
 let pipelineInstalled = false;
 let playbackInterceptorInstalled = false;
 let shouldBlockNativePlayback = () => false;
-let originalAudioPlay = null;
+let originalMediaPlay = null;
 let nativeTtsBlockUntil = 0;
-let pendingNativeTtsBlocks = 0;
-const nativeTtsBlockedSources = new Set();
-const suppressedNativeTtsElementSources = new WeakMap();
+const mutedMediaState = new WeakMap();
+const nativeTtsSourceUrls = new Set();
 
-function readMediaSource(element) {
-    return typeof element?.currentSrc === 'string' && element.currentSrc
-        ? element.currentSrc
-        : (typeof element?.src === 'string' ? element.src : '');
-}
-
-function armNativeTtsBlock(audio) {
-    if (!shouldBlockNativePlayback()) return;
-    nativeTtsBlockUntil = Date.now() + NATIVE_TTS_BLOCK_WINDOW_MS;
-    pendingNativeTtsBlocks += 1;
-    if (typeof audio === 'string' && audio.trim()) {
-        nativeTtsBlockedSources.add(audio.trim());
+function normalizeMediaUrl(url) {
+    const value = typeof url === 'string' ? url.trim() : '';
+    if (!value) return '';
+    try {
+        const anchor = document.createElement('a');
+        anchor.href = value;
+        return anchor.href;
+    } catch {
+        return value;
     }
-    console.log(`[${MODULE}] Armed native TTS playback block: pending=${pendingNativeTtsBlocks}`);
 }
 
-function expireNativeTtsBlockWindow() {
-    if (Date.now() <= nativeTtsBlockUntil) return;
-    pendingNativeTtsBlocks = 0;
-    nativeTtsBlockedSources.clear();
+function getAllowedLive2DAudioUrls() {
+    if (typeof window === 'undefined') return null;
+    if (!(window[LIVE2D_ALLOWED_AUDIO_URLS_KEY] instanceof Set)) {
+        window[LIVE2D_ALLOWED_AUDIO_URLS_KEY] = new Set();
+    }
+    return window[LIVE2D_ALLOWED_AUDIO_URLS_KEY];
 }
 
-function isLikelyNativeTtsAudio(element) {
-    if (!(element instanceof HTMLAudioElement)) return false;
-    expireNativeTtsBlockWindow();
-
-    const source = readMediaSource(element);
-    if (element.id === 'tts_audio') return true;
-    if (nativeTtsBlockedSources.has(source)) return true;
-    if (pendingNativeTtsBlocks > 0 && source.startsWith('data:audio/')) return true;
-    return false;
+function isAllowedLive2DAudioElement(element) {
+    const allowedUrls = getAllowedLive2DAudioUrls();
+    if (!allowedUrls) return false;
+    const src = normalizeMediaUrl(element?.currentSrc || element?.src || '');
+    return !!src && allowedUrls.has(src);
 }
 
-function dispatchNativeTtsEnded(element) {
+function markNativeTtsSource(audio) {
+    if (typeof audio !== 'string') return;
+    const src = normalizeMediaUrl(audio);
+    if (src) nativeTtsSourceUrls.add(src);
+}
+
+function startNativeTtsBlockWindow(audio) {
+    markNativeTtsSource(audio);
+    nativeTtsBlockUntil = Date.now() + NATIVE_TTS_BLOCK_WINDOW_MS;
+}
+
+function isNativeTtsAudioElement(element) {
+    if (!element || isAllowedLive2DAudioElement(element)) return false;
+    if (element.id === SILLYTAVERN_TTS_AUDIO_ID) return true;
+
+    const src = normalizeMediaUrl(element.currentSrc || element.src || '');
+    if (src && nativeTtsSourceUrls.has(src)) return true;
+
+    return Date.now() < nativeTtsBlockUntil;
+}
+
+function rememberMediaState(element) {
+    if (!element || mutedMediaState.has(element)) return;
+    mutedMediaState.set(element, {
+        muted: element.muted === true,
+        volume: Number.isFinite(Number(element.volume)) ? Number(element.volume) : 1,
+    });
+}
+
+function restoreMediaState(element) {
+    const state = mutedMediaState.get(element);
+    if (!state) return;
+    try { element.muted = state.muted; } catch { /* noop */ }
+    try { element.volume = state.volume; } catch { /* noop */ }
+    mutedMediaState.delete(element);
+}
+
+function stopNativeTtsMediaElement(element, reason = 'blocked') {
+    rememberMediaState(element);
+    try { element.muted = true; } catch { /* noop */ }
+    try { element.volume = 0; } catch { /* noop */ }
+    try { element.pause?.(); } catch { /* noop */ }
+    try {
+        if (Number.isFinite(element.currentTime)) element.currentTime = 0;
+    } catch { /* noop */ }
+
+    console.log(`[${MODULE}] Prevented SillyTavern native TTS playback (${reason}).`);
     Promise.resolve().then(() => {
         try { element.dispatchEvent(new Event('ended')); } catch { /* noop */ }
     });
 }
 
-function suppressNativeTtsElement(element, reason) {
-    const source = readMediaSource(element);
-    const previousSource = suppressedNativeTtsElementSources.get(element);
-    if (previousSource !== source) {
-        suppressedNativeTtsElementSources.set(element, source);
-        pendingNativeTtsBlocks = Math.max(0, pendingNativeTtsBlocks - 1);
-    }
-
-    const previousMuted = element.muted;
-    const previousVolume = element.volume;
-    console.log(`[${MODULE}] Blocking SillyTavern native TTS playback via ${reason}.`, {
-        sourceType: source.startsWith('data:audio/') ? 'data-url' : source ? 'url' : 'empty',
-        pending: pendingNativeTtsBlocks,
-    });
-
-    try { element.muted = true; } catch { /* noop */ }
-    try { element.volume = 0; } catch { /* noop */ }
-    try { element.pause(); } catch { /* noop */ }
-    try { element.currentTime = Number.isFinite(element.duration) && element.duration > 0 ? element.duration : 0; } catch { /* noop */ }
-
-    Promise.resolve().then(() => {
-        try { element.muted = previousMuted; } catch { /* noop */ }
-        try { element.volume = previousVolume; } catch { /* noop */ }
-    });
-
-    dispatchNativeTtsEnded(element);
-}
-
 function installNativeTtsPlaybackBlocker() {
-    if (playbackInterceptorInstalled || typeof HTMLAudioElement === 'undefined') return;
+    const MediaElement = typeof HTMLMediaElement !== 'undefined'
+        ? HTMLMediaElement
+        : (typeof HTMLAudioElement !== 'undefined' ? HTMLAudioElement : null);
+    if (playbackInterceptorInstalled || !MediaElement) return;
     playbackInterceptorInstalled = true;
-    originalAudioPlay = HTMLAudioElement.prototype.play;
-    HTMLAudioElement.prototype.play = function patchedLive2DPlusPlay() {
-        if (shouldBlockNativePlayback() && isLikelyNativeTtsAudio(this)) {
-            suppressNativeTtsElement(this, 'play()');
+    originalMediaPlay = MediaElement.prototype.play;
+    MediaElement.prototype.play = function patchedLive2DPlusPlay() {
+        if (shouldBlockNativePlayback() && isNativeTtsAudioElement(this)) {
+            stopNativeTtsMediaElement(this, 'play() guard');
             return Promise.resolve();
         }
-        return originalAudioPlay.apply(this, arguments);
+        if (this?.id === SILLYTAVERN_TTS_AUDIO_ID) restoreMediaState(this);
+        return originalMediaPlay.apply(this, arguments);
     };
-
-    const handleNativeMediaEvent = (event) => {
-        const element = event.target;
-        if (shouldBlockNativePlayback() && isLikelyNativeTtsAudio(element)) {
-            suppressNativeTtsElement(element, event.type);
-        }
-    };
-
-    if (typeof document !== 'undefined') {
-        document.addEventListener('play', handleNativeMediaEvent, true);
-        document.addEventListener('playing', handleNativeMediaEvent, true);
-        document.addEventListener('canplay', handleNativeMediaEvent, true);
-    }
 }
 
 async function resolveAudioBlob(audio) {
@@ -725,7 +729,8 @@ export function setupSttPipeline({ isEnabled, getModelUrl, getSettings } = {}) {
         const settings = typeof getSettings === 'function' ? getSettings() : {};
         return settings.enabled === true
             && settings.routeTtsToLive2D === true
-            && settings.blockOriginalTtsPlayback === true;
+            && settings.blockOriginalTtsPlayback === true
+            && !!window.live2dPlusModel?.speak;
     };
 
     const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null;
@@ -749,8 +754,9 @@ export function setupSttPipeline({ isEnabled, getModelUrl, getSettings } = {}) {
         const settings = typeof getSettings === 'function' ? getSettings() : {};
         const sttEnabled = typeof isEnabled === 'function' ? isEnabled() : settings.sttEnabled === true;
         const routeToLive2D = settings.enabled === true && settings.routeTtsToLive2D === true;
+
         if (routeToLive2D && settings.blockOriginalTtsPlayback === true) {
-            armNativeTtsBlock(audio);
+            startNativeTtsBlockWindow(audio);
         }
 
         if (!sttEnabled && !routeToLive2D) {

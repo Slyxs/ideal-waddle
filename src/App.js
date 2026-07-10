@@ -178,17 +178,20 @@ function MotionTestSection() {
     const [modelInfo, setModelInfo] = useState({ name: '', motions: {}, expressions: [], message: '' });
     const resetTimerRef = useRef(0);
 
-    useEffect(() => () => {
+    const clearResetTimer = useCallback(() => {
         if (resetTimerRef.current) window.clearTimeout(resetTimerRef.current);
+        resetTimerRef.current = 0;
     }, []);
 
-    const scheduleTestReset = useCallback((delayMs = DEFAULT_STATE_RESET_DELAY_MS) => {
-        if (resetTimerRef.current) window.clearTimeout(resetTimerRef.current);
+    const schedulePreviewReset = useCallback((model, delayMs = DEFAULT_STATE_RESET_DELAY_MS) => {
+        clearResetTimer();
         resetTimerRef.current = window.setTimeout(() => {
             resetTimerRef.current = 0;
-            resetDynamicState(window.live2dPlusModel);
-        }, Math.min(Math.max(Number(delayMs) || DEFAULT_STATE_RESET_DELAY_MS, 0), 60000));
-    }, []);
+            resetDynamicState(model);
+        }, delayMs);
+    }, [clearResetTimer]);
+
+    useEffect(() => () => clearResetTimer(), [clearResetTimer]);
 
     const refresh = useCallback(() => {
         const model = window.live2dPlusModel;
@@ -218,20 +221,32 @@ function MotionTestSection() {
         setModelInfo({ name, motions, expressions, message: hasAny ? '' : 'No motions or expressions found.' });
     }, []);
 
-    function playMotion(group, index, motion) {
+    async function playMotion(group, index) {
+        const model = window.live2dPlusModel;
+        if (!model) return;
+        clearResetTimer();
         try {
-            window.live2dPlusModel?.motion?.(group, index);
-            scheduleTestReset(readMotionDurationMs(motion));
+            const started = await startMotionWithoutInterruptingAudio(model, { groupName: group, motionIndex: index }, {
+                onMotionStarted: (motion) => schedulePreviewReset(model, readMotionDurationMs(motion)),
+            });
+            if (!started) schedulePreviewReset(model);
+        } catch (err) {
+            console.error('[Live2D+] Motion error:', err);
+            schedulePreviewReset(model);
         }
-        catch (err) { console.error('[Live2D+] Motion error:', err); }
     }
 
     function playExpression(index) {
+        const model = window.live2dPlusModel;
+        if (!model) return;
+        clearResetTimer();
         try {
-            window.live2dPlusModel?.expression?.(index);
-            scheduleTestReset(DEFAULT_STATE_RESET_DELAY_MS);
+            model.expression?.(index);
+            schedulePreviewReset(model);
+        } catch (err) {
+            console.error('[Live2D+] Expression error:', err);
+            schedulePreviewReset(model);
         }
-        catch (err) { console.error('[Live2D+] Expression error:', err); }
     }
 
     const btnStyle = { fontSize: '0.8em', padding: '2px 8px', marginBottom: '4px' };
@@ -272,7 +287,7 @@ function MotionTestSection() {
                     </small>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                         {motions.map((motion, i) => (
-                            <div key={i} className="menu_button" onClick={() => playMotion(group, i, motion)} style={btnStyle}>
+                            <div key={i} className="menu_button" onClick={() => playMotion(group, i)} style={btnStyle}>
                                 {getMotionLabel(motion, i)}
                             </div>
                         ))}
@@ -493,19 +508,29 @@ const TTS_DYNAMIC_TIMESTAMPS_READY_EVENT = 'TTSDynamicTimestampsReady';
 const LIVE2D_MODEL_INFO_EVENT = 'Live2DPlusModelInfoChanged';
 const LIVE2D_MOTION_PRIORITY_FORCE = 3;
 const DEFAULT_STATE_RESET_DELAY_MS = 1800;
+const LIVE2D_ALLOWED_AUDIO_URLS_KEY = '__live2dPlusAllowedAudioUrls';
 
-function readMotionDurationMs(motion, fallbackMs = DEFAULT_STATE_RESET_DELAY_MS) {
-    const rawDuration = [
-        motion?.duration,
-        motion?._duration,
-        typeof motion?.getDuration === 'function' ? motion.getDuration() : null,
-    ]
-        .map((value) => Number(value))
-        .find((value) => Number.isFinite(value) && value > 0);
+function normalizeAudioUrl(url) {
+    const value = typeof url === 'string' ? url.trim() : '';
+    if (!value) return '';
+    try {
+        const anchor = document.createElement('a');
+        anchor.href = value;
+        return anchor.href;
+    } catch {
+        return value;
+    }
+}
 
-    if (!Number.isFinite(rawDuration)) return fallbackMs;
-    const durationMs = rawDuration > 100 ? rawDuration : rawDuration * 1000;
-    return Math.min(Math.max(Math.round(durationMs), 250), 30000);
+function allowLive2DAudioUrl(url) {
+    if (typeof window === 'undefined') return () => {};
+    if (!(window[LIVE2D_ALLOWED_AUDIO_URLS_KEY] instanceof Set)) {
+        window[LIVE2D_ALLOWED_AUDIO_URLS_KEY] = new Set();
+    }
+    const normalized = normalizeAudioUrl(url);
+    if (!normalized) return () => {};
+    window[LIVE2D_ALLOWED_AUDIO_URLS_KEY].add(normalized);
+    return () => window[LIVE2D_ALLOWED_AUDIO_URLS_KEY]?.delete(normalized);
 }
 
 function readNeutralEmotion(settings = {}) {
@@ -688,9 +713,24 @@ function resetDynamicState(model) {
     resetModelExpression(model);
 }
 
+function readMotionDurationMs(motion, fallbackMs = DEFAULT_STATE_RESET_DELAY_MS) {
+    const rawDuration = [
+        motion?.duration,
+        motion?._duration,
+        typeof motion?.getDuration === 'function' ? motion.getDuration() : null,
+    ]
+        .map((value) => Number(value))
+        .find((value) => Number.isFinite(value) && value > 0);
+
+    if (!Number.isFinite(rawDuration)) return fallbackMs;
+    const durationMs = rawDuration > 100 ? rawDuration : rawDuration * 1000;
+    return Math.min(Math.max(Math.round(durationMs), 250), 30000);
+}
+
 async function startMotionWithoutInterruptingAudio(model, parsedMotion, options = {}) {
     const motionManager = getMotionManager(model);
     const shouldContinue = typeof options.shouldContinue === 'function' ? options.shouldContinue : () => true;
+    const onMotionStarted = typeof options.onMotionStarted === 'function' ? options.onMotionStarted : null;
     if (!motionManager || typeof motionManager.loadMotion !== 'function' || typeof motionManager._startMotion !== 'function') {
         console.warn('[Live2D Dynamic] Motion manager cannot start a cue without interrupting audio.');
         return false;
@@ -723,6 +763,7 @@ async function startMotionWithoutInterruptingAudio(model, parsedMotion, options 
 
         motionManager.playing = true;
         try { motionManager.emit?.('motionStart', parsedMotion.groupName, parsedMotion.motionIndex, null); } catch { /* noop */ }
+        try { onMotionStarted?.(motion); } catch { /* noop */ }
         motionManager._startMotion(motion);
         return true;
     } catch (error) {
@@ -1105,8 +1146,12 @@ function Live2DCanvas({ settings, onPositionCommit }) {
 
             let settled = false;
             const segmentUrls = [];
+            const releaseAllowedAudioUrls = [];
             const timeline = calculatePlaybackTimeline(detail, settings);
             const releaseSegmentUrls = () => {
+                while (releaseAllowedAudioUrls.length) {
+                    try { releaseAllowedAudioUrls.pop()?.(); } catch { /* noop */ }
+                }
                 while (segmentUrls.length) {
                     const url = segmentUrls.pop();
                     if (url) {
@@ -1151,7 +1196,10 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                 const sliced = await buildSegmentAudioUrls(detail.blobUrl, timeline);
                 if (settled) return;
                 for (const item of sliced) {
-                    if (item?.url) segmentUrls.push(item.url);
+                    if (item?.url) {
+                        segmentUrls.push(item.url);
+                        releaseAllowedAudioUrls.push(allowLive2DAudioUrl(item.url));
+                    }
                 }
 
                 for (let index = 0; index < sliced.length; index += 1) {
