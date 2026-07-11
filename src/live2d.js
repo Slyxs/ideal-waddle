@@ -2,32 +2,36 @@
 // Live2D runtime loading and model utilities
 // ---------------------------------------------------------------------------
 
-// The runtime libraries are bundled into this extension's build by Webpack
-// (imported below as raw source strings via the `asset/source` rule in
-// webpack.config.js). They are legacy browser-global / UMD scripts that must
-// run in *global* scope so they can attach to `window` (window.PIXI,
-// window.Live2DCubismCore, etc.). We therefore execute them through
-// Blob-backed <script> tags rather than as ES modules — this avoids any
-// network requests (no 404s) while preserving correct global-scope semantics.
+import * as PIXI from 'pixi.js';
+import { CRTFilter, OutlineFilter, PixelateFilter } from 'pixi-filters';
+
+// pixi-live2d-display is now loaded from npm after the legacy Cubism runtime
+// globals are available. These core scripts are not provided by the installed
+// npm packages and still need global-scope execution.
 import tweenLiteSource from './lib/TweenLite-1.20.2.js';
 import live2dSource from './lib/live2d.min.js';
 import cubismCoreSource from './lib/live2dcubismcore.min.js';
-import pixiSource from './lib/pixi-7.4.2.min.js';
-import pixiLive2DSource from './lib/pixi-live2d-display-lipsyncpatch-0.5.0-ls-8.min.js';
-import pixiFiltersSource from './lib/pixi-filters.min.js';
 
 const EXTENSION_FOLDER = 'Extension-Live2D-Plus';
 const EXTENSION_WEB_PATH = `/scripts/extensions/third-party/${EXTENSION_FOLDER}`;
 
-// Loaded in dependency order: cores and PIXI first, then the plugins that
-// extend window.PIXI (pixi-live2d-display, pixi-filters).
-const LIVE2D_RUNTIME_MODULES = [
+const PIXI_RUNTIME = {
+    ...PIXI,
+    filters: {
+        ...(PIXI.filters || {}),
+        AlphaFilter: PIXI.AlphaFilter,
+        CRTFilter,
+        NoiseFilter: PIXI.NoiseFilter,
+        OutlineFilter,
+        PixelateFilter,
+    },
+};
+
+// Loaded in dependency order before importing pixi-live2d-display from npm.
+const LIVE2D_CORE_MODULES = [
     { name: 'TweenLite-1.20.2.js', source: tweenLiteSource },
     { name: 'live2d.min.js', source: live2dSource },
     { name: 'live2dcubismcore.min.js', source: cubismCoreSource },
-    { name: 'pixi-7.4.2.min.js', source: pixiSource },
-    { name: 'pixi-live2d-display-lipsyncpatch-0.5.0-ls-8.min.js', source: pixiLive2DSource },
-    { name: 'pixi-filters.min.js', source: pixiFiltersSource },
 ];
 
 const SCRIPT_ATTR = 'data-live2dplus-src';
@@ -78,9 +82,24 @@ function injectScript(name, source) {
 }
 
 let _runtimePromise = null;
+let _live2DModulePromise = null;
 
-function muteLive2DSoundManager() {
-    const soundManager = window.PIXI?.live2d?.SoundManager;
+async function loadLive2DModule() {
+    if (!_live2DModulePromise) {
+        _live2DModulePromise = import('pixi-live2d-display-lipsyncpatch');
+    }
+
+    return _live2DModulePromise;
+}
+
+function exposePixiGlobal() {
+    if (typeof window !== 'undefined') {
+        window.PIXI = PIXI_RUNTIME;
+    }
+}
+
+function muteLive2DSoundManager(soundManager) {
+    soundManager = soundManager || window.PIXI?.live2d?.SoundManager;
     if (soundManager) {
         soundManager.volume = 0;
     }
@@ -91,7 +110,9 @@ export async function loadLive2DRuntime() {
         _runtimePromise = (async () => {
             if (typeof document === 'undefined') return;
 
-            for (const { name, source } of LIVE2D_RUNTIME_MODULES) {
+            exposePixiGlobal();
+
+            for (const { name, source } of LIVE2D_CORE_MODULES) {
                 await injectScript(name, source);
             }
 
@@ -99,22 +120,30 @@ export async function loadLive2DRuntime() {
                 throw new Error(`Cubism 4 core failed to load from ${EXTENSION_WEB_PATH}/lib/live2dcubismcore.min.js`);
             }
 
+            const live2d = await loadLive2DModule();
+            const Live2DModel = live2d?.Live2DModel;
+
+            if (!Live2DModel) {
+                throw new Error('Live2D runtime failed to initialize (Live2DModel missing from npm package).');
+            }
+
+            Live2DModel.registerTicker?.(PIXI.Ticker);
+
             // Default model-bundled motion sounds to silent. The per-model patch
             // below keeps motion playback muted even after speak() raises volume.
-            muteLive2DSoundManager();
+            muteLive2DSoundManager(live2d.SoundManager);
+
+            return { PIXI: PIXI_RUNTIME, Live2DModel, SoundManager: live2d.SoundManager };
         })();
     }
 
-    await _runtimePromise;
+    const runtime = await _runtimePromise;
 
-    const PIXI = window.PIXI;
-    const Live2DModel = PIXI?.live2d?.Live2DModel;
-
-    if (!PIXI || !Live2DModel) {
+    if (!runtime?.PIXI || !runtime?.Live2DModel) {
         throw new Error('Live2D runtime failed to initialize (PIXI or Live2DModel missing).');
     }
 
-    return { PIXI, Live2DModel };
+    return runtime;
 }
 
 function isPlainOptions(value) {
