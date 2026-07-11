@@ -983,16 +983,31 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     const appRef = useRef(null);
     const modelRef = useRef(null);
     const rendererRef = useRef(null);
+    const currentSettingsRef = useRef(settings);
     const dragStateRef = useRef(null);
     const activeLipsyncRef = useRef(null);
+    const stateResetTimerRef = useRef(0);
     const captionControllerRef = useRef(null);
     const [status, setStatus] = useState({ state: 'loading', message: 'Initializing...' });
     const [pos, setPos] = useState({ x: settings.positionX, y: settings.positionY });
 
+    useEffect(() => {
+        currentSettingsRef.current = settings;
+    }, [settings]);
+
+    const clearPendingStateReset = useCallback(() => {
+        if (stateResetTimerRef.current && typeof window !== 'undefined') {
+            window.clearTimeout(stateResetTimerRef.current);
+        }
+        stateResetTimerRef.current = 0;
+    }, []);
+
     const resetModelStateAfterPlayback = useCallback((model = modelRef.current) => {
-        if (!model || settings.resetExpressionAfterPlayback === false) return;
+        clearPendingStateReset();
+        const liveSettings = currentSettingsRef.current;
+        if (!model || liveSettings?.resetExpressionAfterPlayback === false) return;
         resetDynamicState(model);
-    }, [settings.resetExpressionAfterPlayback]);
+    }, [clearPendingStateReset]);
 
     const stopActiveLipsync = useCallback(() => {
         activeLipsyncRef.current?.stop?.();
@@ -1000,6 +1015,8 @@ function Live2DCanvas({ settings, onPositionCommit }) {
         captionControllerRef.current?.clear();
         resetModelStateAfterPlayback();
     }, [resetModelStateAfterPlayback]);
+
+    useEffect(() => clearPendingStateReset, [clearPendingStateReset]);
 
     useEffect(() => {
         const controller = createLive2DCaptionController(rootRef.current);
@@ -1175,16 +1192,17 @@ function Live2DCanvas({ settings, onPositionCommit }) {
 
         const handleDynamicTimestampsReady = (event) => {
             const detail = event.detail || {};
+            const liveSettings = currentSettingsRef.current || settings;
             console.log('[Live2D+ Dynamic] Event received:', {
-                routeTtsToLive2D: settings.routeTtsToLive2D,
-                dynamicMode: settings.dynamicMode,
+                routeTtsToLive2D: liveSettings.routeTtsToLive2D,
+                dynamicMode: liveSettings.dynamicMode,
                 hasBlobUrl: !!detail.blobUrl,
                 text: detail.text || '',
                 segments: detail.segments || [],
                 approximate: detail.approximate === true,
             });
 
-            if (!settings.routeTtsToLive2D || !detail.blobUrl) return;
+            if (!liveSettings.routeTtsToLive2D || !detail.blobUrl) return;
 
             const model = modelRef.current;
             if (!model?.speak) {
@@ -1198,7 +1216,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
 
             let settled = false;
             const segmentUrls = [];
-            const timeline = calculatePlaybackTimeline(detail, settings);
+            const timeline = calculatePlaybackTimeline(detail, liveSettings);
             const releaseSegmentUrls = () => {
                 while (segmentUrls.length) {
                     const url = segmentUrls.pop();
@@ -1208,6 +1226,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                 }
             };
             const cleanup = ({ reset = false } = {}) => {
+                detail.signal?.removeEventListener?.('abort', handleAbort);
                 if (reset) resetModelStateAfterPlayback(model);
                 releaseSegmentUrls();
                 if (detail.blobUrl) {
@@ -1236,13 +1255,17 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                 if (settled) return;
                 console.log('[Live2D+ Dynamic] Playback stopped.');
                 try { model.stopSpeaking?.(); } catch { /* noop */ }
-                settled = true;
-                captionControllerRef.current?.clear();
-                cleanup({ reset: true });
-                detail.resolve?.();
+                finish();
             };
+            const handleAbort = () => stop();
+
+            if (detail.signal?.aborted) {
+                finish();
+                return;
+            }
 
             activeLipsyncRef.current = { finish, fail, stop };
+            detail.signal?.addEventListener?.('abort', handleAbort, { once: true });
             console.log('[Live2D+ Dynamic] Playback timeline:', timeline);
 
             const playSegmentsSequentially = async () => {
@@ -1267,7 +1290,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                     const durationMs = Math.max(350, Math.round(Math.max(0, (end || 0) - (start || 0)) * 1000));
                     captionControllerRef.current?.start({ text: segment?.text || '', durationMs });
 
-                    applyDynamicCue(model, settings, segment, { shouldContinue: () => !settled })
+                    applyDynamicCue(model, liveSettings, segment, { shouldContinue: () => !settled })
                         .then((cue) => {
                             if (!settled) console.log('[Live2D+ Dynamic] Applied cue:', { segment, cue });
                         })
