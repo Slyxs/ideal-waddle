@@ -66,10 +66,23 @@ const LIVE2D_PLUS_SETTINGS_STYLES = `
 }
 
 .live2d-plus-settings .mapping-row.tap-row {
-    grid-template-columns: minmax(96px, 0.8fr) minmax(120px, 1fr) minmax(120px, 1fr) minmax(160px, 1.2fr);
+    grid-template-columns: minmax(96px, 0.8fr) 1fr;
+    align-items: start;
 }
 
-.live2d-plus-settings .mapping-row.tap-row textarea.text_pole {
+.live2d-plus-settings .tap-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.live2d-plus-settings .tap-selects {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr);
+    gap: 6px;
+}
+
+.live2d-plus-settings .tap-fields textarea.text_pole {
     min-height: 54px;
     resize: vertical;
 }
@@ -652,9 +665,13 @@ function TapInteractionsSection({ settings, onChange }) {
     const renderMappingRow = ({ id, name }, mapping, updateMapping) => (
         <div className="mapping-row tap-row" key={id}>
             <strong>{name}</strong>
-            <MappingSelect label="Motion" value={mapping.motion} options={motionOptions} onChange={(value) => updateMapping({ motion: value })} />
-            <MappingSelect label="Expression" value={mapping.expression} options={expressionOptions} onChange={(value) => updateMapping({ expression: value })} />
-            <TapMessageInput value={mapping.message} onChange={(value) => updateMapping({ message: value })} />
+            <div className="tap-fields">
+                <div className="tap-selects">
+                    <MappingSelect label="Motion" value={mapping.motion} options={motionOptions} onChange={(value) => updateMapping({ motion: value })} />
+                    <MappingSelect label="Expression" value={mapping.expression} options={expressionOptions} onChange={(value) => updateMapping({ expression: value })} />
+                </div>
+                <TapMessageInput value={mapping.message} onChange={(value) => updateMapping({ message: value })} />
+            </div>
         </div>
     );
 
