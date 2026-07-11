@@ -567,7 +567,6 @@ const TTS_DYNAMIC_TIMESTAMPS_READY_EVENT = 'TTSDynamicTimestampsReady';
 const LIVE2D_MODEL_INFO_EVENT = 'Live2DPlusModelInfoChanged';
 const LIVE2D_MOTION_PRIORITY_FORCE = 3;
 const DEFAULT_STATE_RESET_DELAY_MS = 1800;
-const LIVE2D_PLUS_NO_IDLE_GROUP = '__live2dPlusNoIdleAfterPlayback__';
 
 function readNeutralEmotion(settings = {}) {
     const labels = Array.isArray(settings.emotionLabels) ? settings.emotionLabels : [];
@@ -729,44 +728,15 @@ function getMotionManager(model) {
     return model?.internalModel?.motionManager || null;
 }
 
-function suppressIdleMotionRestart(model) {
-    const state = getMotionManager(model)?.state;
-    if (!state) return;
-
-    try {
-        state.setReservedIdle?.(LIVE2D_PLUS_NO_IDLE_GROUP, -1);
-        return;
-    } catch { /* noop */ }
-
-    try {
-        state.reservedIdleGroup = LIVE2D_PLUS_NO_IDLE_GROUP;
-        state.reservedIdleIndex = -1;
-    } catch { /* noop */ }
-}
-
 function stopModelMotionsOnly(model) {
     const motionManager = getMotionManager(model);
-    try { model?.stopMotions?.(); } catch { /* noop */ }
-    try { motionManager?.stopAllMotions?.(); } catch { /* noop */ }
     try { motionManager?._stopAllMotions?.(); } catch { /* noop */ }
     try { motionManager?.queueManager?.stopAllMotions?.(); } catch { /* noop */ }
     try { motionManager?.state?.reset?.(); } catch { /* noop */ }
-    try { motionManager?.stopSpeaking?.(); } catch { /* noop */ }
-    try { motionManager.playing = false; } catch { /* noop */ }
 }
 
 function resetModelExpression(model) {
     const expressionManager = model?.internalModel?.motionManager?.expressionManager;
-    if (!expressionManager) return;
-
-    try { expressionManager.reserveExpressionIndex = -1; } catch { /* noop */ }
-    try { expressionManager.stopAllExpressions?.(); } catch { /* noop */ }
-    try {
-        if (expressionManager.defaultExpression) {
-            expressionManager.currentExpression = expressionManager.defaultExpression;
-        }
-    } catch { /* noop */ }
-
     if (typeof expressionManager?.resetExpression === 'function') {
         try { expressionManager.resetExpression(); return; } catch { /* noop */ }
     }
@@ -787,10 +757,9 @@ function readMotionDurationMs(motion, fallbackMs = DEFAULT_STATE_RESET_DELAY_MS)
     return Math.min(Math.max(Math.round(durationMs), 250), 60000);
 }
 
-function resetDynamicState(model, { suppressIdle = true } = {}) {
+function resetDynamicState(model) {
     stopModelMotionsOnly(model);
     resetModelExpression(model);
-    if (suppressIdle) suppressIdleMotionRestart(model);
 }
 
 async function startMotionWithoutInterruptingAudio(model, parsedMotion, options = {}) {
