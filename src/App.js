@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { normalizeSettings, resolveModelUrl, MODEL_SOURCES } from './settings';
+import { normalizeSettings, resolveModelUrl, MODEL_SOURCES, CAPTION_STYLE_OPTIONS } from './settings';
 import { EXTENSION_WEB_PATH } from './stt';
 import { fetchOpenAiModels } from './dynamicAnalysis';
 import { loadLive2DRuntime, buildFilters, applyModelTransform, applyModelInteraction, muteModelMotionAudio } from './live2d';
+import { createLive2DCaptionController } from './captions';
 
 const LIVE2D_PLUS_SETTINGS_STYLES = `
 .live2d-plus-settings .field,
@@ -117,6 +118,10 @@ function Slider({ label, value, min, max, step, onChange, displayValue }) {
             />
         </div>
     );
+}
+
+function formatNumber(value, digits = 2) {
+    return Number(value).toFixed(digits).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
 }
 
 function ColorInput({ label, value, onChange }) {
@@ -973,12 +978,14 @@ function dispatchRuntimeModelInfo(model) {
 // ---------------------------------------------------------------------------
 
 function Live2DCanvas({ settings, onPositionCommit }) {
+    const rootRef = useRef(null);
     const containerRef = useRef(null);
     const appRef = useRef(null);
     const modelRef = useRef(null);
     const rendererRef = useRef(null);
     const dragStateRef = useRef(null);
     const activeLipsyncRef = useRef(null);
+    const captionControllerRef = useRef(null);
     const [status, setStatus] = useState({ state: 'loading', message: 'Initializing...' });
     const [pos, setPos] = useState({ x: settings.positionX, y: settings.positionY });
 
@@ -990,8 +997,24 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     const stopActiveLipsync = useCallback(() => {
         activeLipsyncRef.current?.stop?.();
         activeLipsyncRef.current = null;
+        captionControllerRef.current?.clear();
         resetModelStateAfterPlayback();
     }, [resetModelStateAfterPlayback]);
+
+    useEffect(() => {
+        const controller = createLive2DCaptionController(rootRef.current);
+        captionControllerRef.current = controller;
+        controller?.updateSettings(settings);
+        return () => {
+            controller?.destroy();
+            captionControllerRef.current = null;
+        };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    useEffect(() => {
+        captionControllerRef.current?.updateSettings(settings);
+    }, [settings]);
 
     // Sync position from settings when not dragging
     useEffect(() => {
@@ -1197,6 +1220,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                 if (settled) return;
                 console.log('[Live2D+ Dynamic] Playback finished.');
                 settled = true;
+                captionControllerRef.current?.finish();
                 cleanup({ reset: true });
                 detail.resolve?.();
             };
@@ -1204,6 +1228,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                 if (settled) return;
                 console.error('[Live2D+ Dynamic] Playback failed:', error);
                 settled = true;
+                captionControllerRef.current?.clear();
                 cleanup({ reset: true });
                 detail.reject?.(error);
             };
@@ -1211,7 +1236,10 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                 if (settled) return;
                 console.log('[Live2D+ Dynamic] Playback stopped.');
                 try { model.stopSpeaking?.(); } catch { /* noop */ }
-                finish();
+                settled = true;
+                captionControllerRef.current?.clear();
+                cleanup({ reset: true });
+                detail.resolve?.();
             };
 
             activeLipsyncRef.current = { finish, fail, stop };
@@ -1235,6 +1263,9 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                         text: segment?.text || '',
                         hasAudio: !!url,
                     });
+
+                    const durationMs = Math.max(350, Math.round(Math.max(0, (end || 0) - (start || 0)) * 1000));
+                    captionControllerRef.current?.start({ text: segment?.text || '', durationMs });
 
                     applyDynamicCue(model, settings, segment, { shouldContinue: () => !settled })
                         .then((cue) => {
@@ -1340,7 +1371,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     };
 
     return (
-        <div style={wrapperStyle} data-live2dplus-root="true">
+        <div ref={rootRef} style={wrapperStyle} data-live2dplus-root="true">
             <div
                 ref={containerRef}
                 style={{ display: 'block', width: '100%', height: '100%' }}
@@ -1408,6 +1439,8 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
             [id]: { ...s.filterParams[id], ...patch },
         },
     });
+
+    const setCaption = (patch) => set({ captions: { ...s.captions, ...patch } });
 
     const handleReload = () => set({ reloadKey: s.reloadKey + 1 });
 
@@ -1506,6 +1539,65 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
                     </SubDrawer>
 
                     <DynamicSettingsSection settings={s} onChange={set} />
+
+                    {/* -- Captions -- */}
+                    <SubDrawer title="Captions">
+                        <CheckboxRow
+                            label="Enable captions"
+                            checked={s.captions.enabled}
+                            onChange={(v) => setCaption({ enabled: v })}
+                        />
+                        <small style={{ opacity: 0.55, display: 'block', marginBottom: '6px' }}>
+                            Captions render over the Live2D overlay while routed TTS segments play.
+                        </small>
+                        {!s.routeTtsToLive2D && (
+                            <small style={{ opacity: 0.65, display: 'block', marginBottom: '6px', color: '#fbbf24' }}>
+                                Turn on Live2D TTS routing in Dynamic Analysis to show captions during playback.
+                            </small>
+                        )}
+
+                        <label className="field">
+                            <span>Caption Style</span>
+                            <select
+                                className="text_pole"
+                                value={s.captions.style}
+                                onChange={(event) => setCaption({ style: event.target.value })}
+                            >
+                                {CAPTION_STYLE_OPTIONS.map((option) => (
+                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                ))}
+                            </select>
+                        </label>
+
+                        <ColorInput label="Base Color" value={s.captions.textColor} onChange={(v) => setCaption({ textColor: v })} />
+                        <ColorInput label="Fill Color" value={s.captions.fillColor} onChange={(v) => setCaption({ fillColor: v })} />
+                        <ColorInput label="Shadow Color" value={s.captions.shadowColor} onChange={(v) => setCaption({ shadowColor: v })} />
+
+                        <Slider label="Font Size" value={s.captions.fontSize} min={18} max={96} step={1}
+                            onChange={(v) => setCaption({ fontSize: v })} displayValue={`${Math.round(s.captions.fontSize)}px`} />
+                        <Slider label="Font Weight" value={s.captions.fontWeight} min={400} max={900} step={100}
+                            onChange={(v) => setCaption({ fontWeight: v })} displayValue={Math.round(s.captions.fontWeight)} />
+                        <Slider label="Letter Spacing" value={s.captions.letterSpacing} min={-0.04} max={0.24} step={0.01}
+                            onChange={(v) => setCaption({ letterSpacing: v })} displayValue={`${formatNumber(s.captions.letterSpacing, 2)}em`} />
+                        <Slider label="Line Height" value={s.captions.lineHeight} min={0.8} max={1.8} step={0.02}
+                            onChange={(v) => setCaption({ lineHeight: v })} displayValue={formatNumber(s.captions.lineHeight, 2)} />
+                        <Slider label="Bottom Offset" value={s.captions.bottomOffset} min={0} max={120} step={1}
+                            onChange={(v) => setCaption({ bottomOffset: v })} displayValue={`${Math.round(s.captions.bottomOffset)}px`} />
+                        <Slider label="Max Width" value={s.captions.maxWidth} min={30} max={100} step={1}
+                            onChange={(v) => setCaption({ maxWidth: v })} displayValue={`${Math.round(s.captions.maxWidth)}%`} />
+
+                        <label className="field">
+                            <span>Custom CSS</span>
+                            <textarea
+                                className="text_pole"
+                                rows={5}
+                                value={s.captions.customCss}
+                                onChange={(event) => setCaption({ customCss: event.target.value })}
+                                placeholder={'transform: translateY(-4px);\nfilter: drop-shadow(0 0 14px rgba(255, 155, 113, 0.35));'}
+                                style={{ width: '100%', resize: 'vertical' }}
+                            />
+                        </label>
+                    </SubDrawer>
 
                     {/* ── Model ── */}
                     <SubDrawer title="Model">

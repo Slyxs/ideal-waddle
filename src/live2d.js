@@ -8,7 +8,6 @@ import { CRTFilter, OutlineFilter, PixelateFilter } from 'pixi-filters';
 // pixi-live2d-display is now loaded from npm after the legacy Cubism runtime
 // globals are available. These core scripts are not provided by the installed
 // npm packages and still need global-scope execution.
-import tweenLiteSource from './lib/TweenLite-1.20.2.js';
 import live2dSource from './lib/live2d.min.js';
 import cubismCoreSource from './lib/live2dcubismcore.min.js';
 
@@ -29,7 +28,6 @@ const PIXI_RUNTIME = {
 
 // Loaded in dependency order before importing pixi-live2d-display from npm.
 const LIVE2D_CORE_MODULES = [
-    { name: 'TweenLite-1.20.2.js', source: tweenLiteSource },
     { name: 'live2d.min.js', source: live2dSource },
     { name: 'live2dcubismcore.min.js', source: cubismCoreSource },
 ];

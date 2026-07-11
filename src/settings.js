@@ -45,6 +45,29 @@ export const DEFAULT_DISABLE_SETTINGS = Object.freeze({
     actionExpressions: false,
 });
 
+export const CAPTION_STYLE_OPTIONS = Object.freeze([
+    { value: 'cinematic', label: 'Cinematic Glow' },
+    { value: 'arcade', label: 'Arcade Outline' },
+    { value: 'soft', label: 'Soft Whisper' },
+]);
+
+export const DEFAULT_CAPTION_SETTINGS = Object.freeze({
+    enabled: false,
+    textColor: '#fff2dc',
+    fillColor: '#ff9b71',
+    shadowColor: '#1c0f1f',
+    fontSize: 38,
+    fontWeight: 700,
+    letterSpacing: 0.01,
+    lineHeight: 1.08,
+    bottomOffset: 26,
+    maxWidth: 78,
+    style: 'cinematic',
+    customCss: '',
+});
+
+const VALID_CAPTION_STYLES = new Set(CAPTION_STYLE_OPTIONS.map((option) => option.value));
+
 export const DEFAULT_SETTINGS = Object.freeze({
     enabled: false,
     followCursor: true,
@@ -64,6 +87,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     actionMappings: [],
     priorityList: DEFAULT_PRIORITY_LIST,
     disableSettings: DEFAULT_DISABLE_SETTINGS,
+    captions: DEFAULT_CAPTION_SETTINGS,
     modelSource: MODEL_SOURCES.DEFAULT,
     customModelUrl: '',
     localModelPath: '',
@@ -97,6 +121,11 @@ function bool(value, fallback = false) {
 
 function text(value) {
     return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeColor(value, fallback) {
+    const color = text(value);
+    return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
 }
 
 function normalizeLabelList(values, fallback = []) {
@@ -186,6 +215,24 @@ function normalizeDisableSettings(source = {}) {
     };
 }
 
+function normalizeCaptionSettings(source = {}) {
+    const captions = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+    return {
+        enabled: bool(captions.enabled, DEFAULT_CAPTION_SETTINGS.enabled),
+        textColor: normalizeColor(captions.textColor, DEFAULT_CAPTION_SETTINGS.textColor),
+        fillColor: normalizeColor(captions.fillColor, DEFAULT_CAPTION_SETTINGS.fillColor),
+        shadowColor: normalizeColor(captions.shadowColor, DEFAULT_CAPTION_SETTINGS.shadowColor),
+        fontSize: Math.round(clamp(captions.fontSize, 18, 96, DEFAULT_CAPTION_SETTINGS.fontSize)),
+        fontWeight: Math.round(clamp(captions.fontWeight, 400, 900, DEFAULT_CAPTION_SETTINGS.fontWeight)),
+        letterSpacing: clamp(captions.letterSpacing, -0.04, 0.24, DEFAULT_CAPTION_SETTINGS.letterSpacing),
+        lineHeight: clamp(captions.lineHeight, 0.8, 1.8, DEFAULT_CAPTION_SETTINGS.lineHeight),
+        bottomOffset: Math.round(clamp(captions.bottomOffset, 0, 120, DEFAULT_CAPTION_SETTINGS.bottomOffset)),
+        maxWidth: Math.round(clamp(captions.maxWidth, 30, 100, DEFAULT_CAPTION_SETTINGS.maxWidth)),
+        style: VALID_CAPTION_STYLES.has(captions.style) ? captions.style : DEFAULT_CAPTION_SETTINGS.style,
+        customCss: typeof captions.customCss === 'string' ? captions.customCss : DEFAULT_CAPTION_SETTINGS.customCss,
+    };
+}
+
 export function normalizeSettings(input = {}) {
     const src = input && typeof input === 'object' ? input : {};
     const filters = src.filters && typeof src.filters === 'object' ? src.filters : {};
@@ -215,6 +262,7 @@ export function normalizeSettings(input = {}) {
         actionMappings: normalizeActionMappings(src.actionMappings),
         priorityList: normalizePriorityList(src.priorityList),
         disableSettings: normalizeDisableSettings(src.disableSettings),
+        captions: normalizeCaptionSettings(src.captions),
         modelSource: Object.values(MODEL_SOURCES).includes(src.modelSource)
             ? src.modelSource
             : DEFAULT_SETTINGS.modelSource,
