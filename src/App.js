@@ -65,6 +65,15 @@ const LIVE2D_PLUS_SETTINGS_STYLES = `
     border-radius: 6px;
 }
 
+.live2d-plus-settings .mapping-row.tap-row {
+    grid-template-columns: minmax(96px, 0.8fr) minmax(120px, 1fr) minmax(120px, 1fr) minmax(160px, 1.2fr);
+}
+
+.live2d-plus-settings .mapping-row.tap-row textarea.text_pole {
+    min-height: 54px;
+    resize: vertical;
+}
+
 .live2d-plus-settings .priority-row {
     grid-template-columns: 1fr auto;
     align-items: center;
@@ -559,6 +568,110 @@ function DynamicSettingsSection({ settings, onChange }) {
     );
 }
 
+function TapMessageInput({ value, onChange }) {
+    return (
+        <label className="field compact-field">
+            <span>Message</span>
+            <textarea
+                className="text_pole"
+                rows={2}
+                value={value || ''}
+                onChange={(event) => onChange(event.target.value)}
+                placeholder="Optional user message"
+            />
+        </label>
+    );
+}
+
+function TapInteractionsSection({ settings, onChange }) {
+    const [modelInfo, setModelInfo] = useState(() => window.live2dPlusModelInfo || readRuntimeModelInfo(window.live2dPlusModel));
+
+    useEffect(() => {
+        const updateModelInfo = (event) => setModelInfo(event.detail || readRuntimeModelInfo(window.live2dPlusModel));
+        window.addEventListener(LIVE2D_MODEL_INFO_EVENT, updateModelInfo);
+        updateModelInfo({ detail: window.live2dPlusModelInfo || readRuntimeModelInfo(window.live2dPlusModel) });
+        return () => window.removeEventListener(LIVE2D_MODEL_INFO_EVENT, updateModelInfo);
+    }, []);
+
+    const motionOptions = Object.entries(modelInfo?.motions || {}).flatMap(([groupName, motions]) => (
+        motions.map((motion, index) => ({
+            value: `${groupName}:${index}`,
+            label: `${groupName} / ${getMotionLabel(motion, index)}`,
+        }))
+    ));
+    const expressionOptions = (modelInfo?.expressions || []).map((expression, index) => ({
+        value: String(index),
+        label: getExpressionLabel(expression, index),
+    }));
+    const hitAreas = Array.isArray(modelInfo?.hitAreas) ? modelInfo.hitAreas : [];
+    const tapInteractions = settings.tapInteractions || {};
+    const defaultMapping = tapInteractions.defaultMapping || {};
+    const hitAreaMappings = tapInteractions.hitAreaMappings || {};
+
+    const updateTapInteractions = (patch) => onChange({
+        ...settings,
+        tapInteractions: { ...tapInteractions, ...patch },
+    });
+    const updateDefaultMapping = (patch) => updateTapInteractions({
+        defaultMapping: { ...defaultMapping, ...patch },
+    });
+    const updateHitAreaMapping = (hitArea, patch) => {
+        const current = hitAreaMappings[hitArea.id] || hitAreaMappings[hitArea.name] || {};
+        updateTapInteractions({
+            hitAreaMappings: {
+                ...hitAreaMappings,
+                [hitArea.id]: { ...current, ...patch },
+            },
+        });
+    };
+
+    const renderMappingRow = ({ id, name }, mapping, updateMapping) => (
+        <div className="mapping-row tap-row" key={id}>
+            <strong>{name}</strong>
+            <MappingSelect label="Motion" value={mapping.motion} options={motionOptions} onChange={(value) => updateMapping({ motion: value })} />
+            <MappingSelect label="Expression" value={mapping.expression} options={expressionOptions} onChange={(value) => updateMapping({ expression: value })} />
+            <TapMessageInput value={mapping.message} onChange={(value) => updateMapping({ message: value })} />
+        </div>
+    );
+
+    return (
+        <SubDrawer title="Tap Interactions">
+            <CheckboxRow
+                label="Enable tap interactions"
+                checked={tapInteractions.enabled !== false}
+                onChange={(value) => updateTapInteractions({ enabled: value })}
+            />
+            <CheckboxRow
+                label="Auto-send interaction"
+                checked={!!tapInteractions.autoSend}
+                onChange={(value) => updateTapInteractions({ autoSend: value })}
+            />
+
+            <div className="section-caption">Default tap</div>
+            <div className="mapping-list compact">
+                {renderMappingRow(
+                    { id: 'default', name: 'Default' },
+                    defaultMapping,
+                    updateDefaultMapping,
+                )}
+            </div>
+
+            <div className="section-caption">Hit areas</div>
+            {hitAreas.length === 0 ? (
+                <div className="hint">No hit areas found on the active model.</div>
+            ) : (
+                <div className="mapping-list">
+                    {hitAreas.map((hitArea) => renderMappingRow(
+                        hitArea,
+                        hitAreaMappings[hitArea.id] || hitAreaMappings[hitArea.name] || {},
+                        (patch) => updateHitAreaMapping(hitArea, patch),
+                    ))}
+                </div>
+            )}
+        </SubDrawer>
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Dynamic Live2D playback helpers
 // ---------------------------------------------------------------------------
@@ -567,6 +680,8 @@ const TTS_DYNAMIC_TIMESTAMPS_READY_EVENT = 'TTSDynamicTimestampsReady';
 const LIVE2D_MODEL_INFO_EVENT = 'Live2DPlusModelInfoChanged';
 const LIVE2D_MOTION_PRIORITY_FORCE = 3;
 const DEFAULT_STATE_RESET_DELAY_MS = 1800;
+const LIVE2D_PLUS_NO_IDLE_GROUP = '__live2dPlusNoIdleAfterPlayback__';
+let sillyTavernScriptPromise = null;
 
 function readNeutralEmotion(settings = {}) {
     const labels = Array.isArray(settings.emotionLabels) ? settings.emotionLabels : [];
@@ -728,15 +843,44 @@ function getMotionManager(model) {
     return model?.internalModel?.motionManager || null;
 }
 
+function suppressIdleMotionRestart(model) {
+    const state = getMotionManager(model)?.state;
+    if (!state) return;
+
+    try {
+        state.setReservedIdle?.(LIVE2D_PLUS_NO_IDLE_GROUP, -1);
+        return;
+    } catch { /* noop */ }
+
+    try {
+        state.reservedIdleGroup = LIVE2D_PLUS_NO_IDLE_GROUP;
+        state.reservedIdleIndex = -1;
+    } catch { /* noop */ }
+}
+
 function stopModelMotionsOnly(model) {
     const motionManager = getMotionManager(model);
+    try { model?.stopMotions?.(); } catch { /* noop */ }
+    try { motionManager?.stopAllMotions?.(); } catch { /* noop */ }
     try { motionManager?._stopAllMotions?.(); } catch { /* noop */ }
     try { motionManager?.queueManager?.stopAllMotions?.(); } catch { /* noop */ }
     try { motionManager?.state?.reset?.(); } catch { /* noop */ }
+    try { motionManager?.stopSpeaking?.(); } catch { /* noop */ }
+    try { motionManager.playing = false; } catch { /* noop */ }
 }
 
 function resetModelExpression(model) {
     const expressionManager = model?.internalModel?.motionManager?.expressionManager;
+    if (!expressionManager) return;
+
+    try { expressionManager.reserveExpressionIndex = -1; } catch { /* noop */ }
+    try { expressionManager.stopAllExpressions?.(); } catch { /* noop */ }
+    try {
+        if (expressionManager.defaultExpression) {
+            expressionManager.currentExpression = expressionManager.defaultExpression;
+        }
+    } catch { /* noop */ }
+
     if (typeof expressionManager?.resetExpression === 'function') {
         try { expressionManager.resetExpression(); return; } catch { /* noop */ }
     }
@@ -757,9 +901,10 @@ function readMotionDurationMs(motion, fallbackMs = DEFAULT_STATE_RESET_DELAY_MS)
     return Math.min(Math.max(Math.round(durationMs), 250), 60000);
 }
 
-function resetDynamicState(model) {
+function resetDynamicState(model, { suppressIdle = true } = {}) {
     stopModelMotionsOnly(model);
     resetModelExpression(model);
+    if (suppressIdle) suppressIdleMotionRestart(model);
 }
 
 async function startMotionWithoutInterruptingAudio(model, parsedMotion, options = {}) {
@@ -841,6 +986,150 @@ async function applyDynamicCue(model, settings, segment, options = {}) {
     }
 
     return cue;
+}
+
+function getSillyTavernContext() {
+    return typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function'
+        ? SillyTavern.getContext()
+        : null;
+}
+
+function getSillyTavernScriptUrl() {
+    if (typeof document !== 'undefined') {
+        const script = document.querySelector('script[src$="/script.js"], script[src="script.js"], script[src="./script.js"]');
+        if (script?.src) return script.src;
+    }
+
+    return '/script.js';
+}
+
+function loadSillyTavernScriptModule() {
+    if (!sillyTavernScriptPromise) {
+        sillyTavernScriptPromise = import(/* webpackIgnore: true */ getSillyTavernScriptUrl());
+    }
+
+    return sillyTavernScriptPromise;
+}
+
+function normalizeHitAreaNames(hitAreas) {
+    return Array.isArray(hitAreas)
+        ? hitAreas.map((hitArea) => String(hitArea || '').trim()).filter(Boolean)
+        : [];
+}
+
+function hasTapMappingValue(mapping) {
+    return !!(mapping?.motion || mapping?.expression || mapping?.message);
+}
+
+function readTapAreaMapping(tapInteractions, hitArea) {
+    const mappings = tapInteractions?.hitAreaMappings || {};
+    return mappings[hitArea.id] || mappings[hitArea.name] || {};
+}
+
+function resolveTapInteractionMapping(model, settings, hitAreas = []) {
+    const tapInteractions = settings?.tapInteractions || {};
+    const tappedAreas = new Set(normalizeHitAreaNames(hitAreas));
+    const hitAreaDefinitions = normalizeRuntimeHitAreas(model?.internalModel?.hitAreas);
+    const mappedHitArea = hitAreaDefinitions
+        .filter((hitArea) => tappedAreas.has(hitArea.id) || tappedAreas.has(hitArea.name))
+        .map((hitArea) => ({ hitArea, mapping: readTapAreaMapping(tapInteractions, hitArea) }))
+        .filter(({ mapping }) => hasTapMappingValue(mapping))
+        .sort((left, right) => left.hitArea.index - right.hitArea.index || left.hitArea.name.localeCompare(right.hitArea.name))[0];
+
+    if (mappedHitArea) {
+        return { ...mappedHitArea.mapping, hitArea: mappedHitArea.hitArea };
+    }
+
+    return { ...(tapInteractions.defaultMapping || {}), hitArea: null };
+}
+
+async function sendTapInteractionMessage(messageText, settings, previousInteractionRef) {
+    const message = typeof messageText === 'string' ? messageText.trim() : '';
+    if (!message) return false;
+
+    const context = getSillyTavernContext();
+    const chat = Array.isArray(context?.chat) ? context.chat : [];
+    const lastMessage = chat[chat.length - 1];
+    if (lastMessage?.is_user && previousInteractionRef.current?.message === message) {
+        console.debug('[Live2D+ Tap] Same interaction as latest user message; skipping duplicate send.');
+        return false;
+    }
+
+    previousInteractionRef.current = { message };
+
+    try { window.$?.('#send_textarea')?.val?.(''); } catch { /* noop */ }
+
+    const scriptModule = await loadSillyTavernScriptModule();
+    if (typeof scriptModule?.sendMessageAsUser !== 'function') {
+        throw new Error('SillyTavern sendMessageAsUser is not available.');
+    }
+
+    await scriptModule.sendMessageAsUser(message);
+
+    if (settings?.tapInteractions?.autoSend) {
+        const liveContext = getSillyTavernContext();
+        await liveContext?.generate?.();
+    }
+
+    return true;
+}
+
+async function playTapInteractionMotion(model, motionValue) {
+    const parsedMotion = parseMotionValue(motionValue);
+    if (!parsedMotion || !model?.motion) return false;
+
+    try {
+        const result = model.motion(parsedMotion.groupName, parsedMotion.motionIndex, undefined, { volume: 0 });
+        return await Promise.resolve(result).then((value) => value !== false);
+    } catch (error) {
+        console.error('[Live2D+ Tap] Motion failed:', error);
+        return false;
+    }
+}
+
+async function playTapInteractionExpression(model, expressionValue) {
+    const expressionIndex = Number.parseInt(expressionValue, 10);
+    if (!Number.isInteger(expressionIndex) || !model?.expression) return false;
+
+    try {
+        const result = model.expression(expressionIndex);
+        return await Promise.resolve(result).then((value) => value !== false);
+    } catch (error) {
+        console.error('[Live2D+ Tap] Expression failed:', error);
+        return false;
+    }
+}
+
+async function applyTapInteraction(model, settings, mapping, previousInteractionRef) {
+    if (!model || !hasTapMappingValue(mapping)) return;
+
+    try {
+        await sendTapInteractionMessage(mapping.message, settings, previousInteractionRef);
+    } catch (error) {
+        console.error('[Live2D+ Tap] Message send failed:', error);
+    }
+    await playTapInteractionExpression(model, mapping.expression);
+    await playTapInteractionMotion(model, mapping.motion);
+}
+
+function readPointerGlobalPoint(event) {
+    const point = event?.global || event?.data?.global;
+    const x = Number(point?.x);
+    const y = Number(point?.y);
+    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+}
+
+async function readPointerHitAreas(model, event) {
+    const point = readPointerGlobalPoint(event);
+    if (!point || typeof model?.hitTest !== 'function') return [];
+
+    try {
+        const hitAreas = await model.hitTest(point.x, point.y);
+        return normalizeHitAreaNames(hitAreas);
+    } catch (error) {
+        console.error('[Live2D+ Tap] Hit test failed:', error);
+        return [];
+    }
 }
 
 async function decodePlaybackBlob(blob) {
@@ -957,6 +1246,20 @@ function normalizeRuntimeExpressions(source) {
     return [];
 }
 
+function normalizeRuntimeHitAreas(source) {
+    const hitAreas = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+    return Object.entries(hitAreas)
+        .map(([id, area]) => {
+            const rawIndex = Number(area?.index);
+            return {
+                id: String(id),
+                name: String(area?.name || id),
+                index: Number.isFinite(rawIndex) ? rawIndex : 9999,
+            };
+        })
+        .sort((left, right) => left.index - right.index || left.name.localeCompare(right.name));
+}
+
 function readRuntimeModelInfo(model) {
     const internalSettings = model?.internalModel?.settings || {};
     return {
@@ -965,6 +1268,7 @@ function readRuntimeModelInfo(model) {
         expressions: normalizeRuntimeExpressions(
             internalSettings.expressions || model?.internalModel?.motionManager?.expressionManager?.definitions
         ),
+        hitAreas: normalizeRuntimeHitAreas(internalSettings.hitAreas || model?.internalModel?.hitAreas),
     };
 }
 
@@ -991,6 +1295,8 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     const activeLipsyncRef = useRef(null);
     const stateResetTimerRef = useRef(0);
     const captionControllerRef = useRef(null);
+    const previousInteractionRef = useRef({ message: '' });
+    const tapEventGuardRef = useRef({ key: '', time: 0 });
     const [status, setStatus] = useState({ state: 'loading', message: 'Initializing...' });
     const [pos, setPos] = useState({ x: settings.positionX, y: settings.positionY });
 
@@ -1052,6 +1358,54 @@ function Live2DCanvas({ settings, onPositionCommit }) {
         model.filters = filters.length > 0 ? filters : null;
     }, []);
 
+    const handleTapAreas = useCallback((hitAreas = []) => {
+        const model = modelRef.current;
+        const liveSettings = currentSettingsRef.current || settings;
+        if (!model || liveSettings?.tapInteractions?.enabled === false) return;
+
+        const normalizedHitAreas = normalizeHitAreaNames(hitAreas);
+        const key = normalizedHitAreas.slice().sort().join('|') || '__default__';
+        const now = Date.now();
+        const lastEvent = tapEventGuardRef.current;
+        if (lastEvent.key === key && now - lastEvent.time < 150) return;
+        tapEventGuardRef.current = { key, time: now };
+
+        const mapping = resolveTapInteractionMapping(model, liveSettings, normalizedHitAreas);
+        if (!hasTapMappingValue(mapping)) return;
+
+        console.debug('[Live2D+ Tap] Interaction:', {
+            hitAreas: normalizedHitAreas,
+            selectedHitArea: mapping.hitArea?.name || 'default',
+            motion: mapping.motion || '',
+            expression: mapping.expression || '',
+            hasMessage: !!mapping.message,
+        });
+
+        applyTapInteraction(model, liveSettings, mapping, previousInteractionRef)
+            .catch((error) => console.error('[Live2D+ Tap] Interaction failed:', error));
+    }, [settings]);
+
+    const attachTapInteractionHandlers = useCallback((model) => {
+        if (!model || typeof model.on !== 'function') return () => {};
+
+        const handleHit = (hitAreas) => handleTapAreas(hitAreas);
+        const handlePointerTap = (event) => {
+            readPointerHitAreas(model, event)
+                .then(handleTapAreas)
+                .catch((error) => console.error('[Live2D+ Tap] Pointer tap failed:', error));
+        };
+
+        model.on('hit', handleHit);
+        model.on('pointertap', handlePointerTap);
+        model.on('click', handlePointerTap);
+
+        return () => {
+            try { model.off?.('hit', handleHit); } catch { /* noop */ }
+            try { model.off?.('pointertap', handlePointerTap); } catch { /* noop */ }
+            try { model.off?.('click', handlePointerTap); } catch { /* noop */ }
+        };
+    }, [handleTapAreas]);
+
     // Model load effect
     const modelUrl = resolveModelUrl(settings);
 
@@ -1066,6 +1420,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
 
         function destroyCurrent() {
             if (modelRef.current) {
+                try { modelRef.current.__live2dPlusTapCleanup?.(); } catch (_) { /* noop */ }
                 try { modelRef.current.destroy?.(); } catch (_) { /* noop */ }
                 modelRef.current = null;
                 window.live2dPlusModel = null;
@@ -1107,12 +1462,12 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                 view.style.width = '100%';
                 view.style.height = '100%';
                 view.style.pointerEvents =
-                    settings.enableHitTesting || settings.followCursor ? 'auto' : 'none';
+                    settings.enableHitTesting || settings.followCursor || settings.tapInteractions?.enabled ? 'auto' : 'none';
                 container.appendChild(view);
 
                 const model = Live2DModel.fromSync(modelUrl, {
                     autoFocus: !!settings.followCursor,
-                    autoHitTest: !!settings.enableHitTesting,
+                    autoHitTest: !!settings.enableHitTesting || !!settings.tapInteractions?.enabled,
                 });
 
                 if (cancelled) { model.destroy?.(); return; }
@@ -1126,6 +1481,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                     applyModelInteraction(model, settings);
                     muteModelMotionAudio(model);
                     applyFilters(settings);
+                    model.__live2dPlusTapCleanup = attachTapInteractionHandlers(model);
                     window.live2dPlusModel = model;
                     dispatchRuntimeModelInfo(model);
                     setStatus({ state: 'ready', message: 'Ready' });
@@ -1174,9 +1530,9 @@ function Live2DCanvas({ settings, onPositionCommit }) {
         const view = appRef.current?.view;
         if (view?.style) {
             view.style.pointerEvents =
-                settings.enableHitTesting || settings.followCursor ? 'auto' : 'none';
+                settings.enableHitTesting || settings.followCursor || settings.tapInteractions?.enabled ? 'auto' : 'none';
         }
-    }, [settings.followCursor, settings.enableHitTesting]);
+    }, [settings.followCursor, settings.enableHitTesting, settings.tapInteractions?.enabled]);
 
     // Filters effect
     const filtersKey = JSON.stringify({ f: settings.filters, p: settings.filterParams });
@@ -1579,6 +1935,8 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
                     </SubDrawer>
 
                     <DynamicSettingsSection settings={s} onChange={set} />
+
+                    <TapInteractionsSection settings={s} onChange={set} />
 
                     {/* -- Captions -- */}
                     <SubDrawer title="Captions">

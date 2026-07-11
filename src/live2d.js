@@ -253,7 +253,7 @@ export function applyModelInteraction(model, settings) {
     if (!model) return;
 
     const autoFocus = !!settings.followCursor;
-    const autoHitTest = !!settings.enableHitTesting;
+    const autoHitTest = !!settings.enableHitTesting || !!settings.tapInteractions?.enabled;
     const interactive = autoFocus || autoHitTest;
 
     if (model.automator) {

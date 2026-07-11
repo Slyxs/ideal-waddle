@@ -45,6 +45,19 @@ export const DEFAULT_DISABLE_SETTINGS = Object.freeze({
     actionExpressions: false,
 });
 
+export const DEFAULT_TAP_INTERACTION_MAPPING = Object.freeze({
+    motion: '',
+    expression: '',
+    message: '',
+});
+
+export const DEFAULT_TAP_INTERACTIONS = Object.freeze({
+    enabled: true,
+    autoSend: false,
+    defaultMapping: DEFAULT_TAP_INTERACTION_MAPPING,
+    hitAreaMappings: {},
+});
+
 export const CAPTION_STYLE_OPTIONS = Object.freeze([
     { value: 'cinematic', label: 'Cinematic Glow' },
     { value: 'arcade', label: 'Arcade Outline' },
@@ -78,6 +91,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     blockOriginalTtsPlayback: true,
     dynamicMode: false,
     resetExpressionAfterPlayback: true,
+    tapInteractions: DEFAULT_TAP_INTERACTIONS,
     voskModelUrl: '',
     analysisBaseUrl: '',
     analysisApiKey: '',
@@ -215,6 +229,43 @@ function normalizeDisableSettings(source = {}) {
     };
 }
 
+function normalizeTapInteractionMapping(source = {}) {
+    const mapping = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+    return {
+        motion: text(mapping.motion),
+        expression: text(mapping.expression),
+        message: text(mapping.message),
+    };
+}
+
+function tapInteractionMappingHasValue(mapping) {
+    return !!(mapping?.motion || mapping?.expression || mapping?.message);
+}
+
+function normalizeTapHitAreaMappings(source = {}) {
+    const mappings = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+    const normalized = {};
+
+    for (const [rawKey, rawMapping] of Object.entries(mappings)) {
+        const key = text(rawKey);
+        if (!key) continue;
+        const mapping = normalizeTapInteractionMapping(rawMapping);
+        if (tapInteractionMappingHasValue(mapping)) normalized[key] = mapping;
+    }
+
+    return normalized;
+}
+
+function normalizeTapInteractions(source = {}) {
+    const interactions = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+    return {
+        enabled: bool(interactions.enabled, DEFAULT_TAP_INTERACTIONS.enabled),
+        autoSend: bool(interactions.autoSend, DEFAULT_TAP_INTERACTIONS.autoSend),
+        defaultMapping: normalizeTapInteractionMapping(interactions.defaultMapping),
+        hitAreaMappings: normalizeTapHitAreaMappings(interactions.hitAreaMappings),
+    };
+}
+
 function normalizeCaptionSettings(source = {}) {
     const captions = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
     return {
@@ -253,6 +304,7 @@ export function normalizeSettings(input = {}) {
         blockOriginalTtsPlayback: bool(src.blockOriginalTtsPlayback, DEFAULT_SETTINGS.blockOriginalTtsPlayback),
         dynamicMode: bool(src.dynamicMode, DEFAULT_SETTINGS.dynamicMode),
         resetExpressionAfterPlayback: bool(src.resetExpressionAfterPlayback, DEFAULT_SETTINGS.resetExpressionAfterPlayback),
+        tapInteractions: normalizeTapInteractions(src.tapInteractions),
         voskModelUrl: typeof src.voskModelUrl === 'string' ? src.voskModelUrl : '',
         analysisBaseUrl: text(src.analysisBaseUrl),
         analysisApiKey: typeof src.analysisApiKey === 'string' ? src.analysisApiKey : '',
