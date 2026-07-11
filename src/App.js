@@ -74,6 +74,19 @@ const LIVE2D_PLUS_SETTINGS_STYLES = `
     resize: vertical;
 }
 
+.live2d-plus-settings .tap-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 4px 0 8px;
+}
+
+.live2d-plus-settings .tap-meta small {
+    min-width: 0;
+    opacity: 0.62;
+}
+
 .live2d-plus-settings .priority-row {
     grid-template-columns: 1fr auto;
     align-items: center;
@@ -586,12 +599,23 @@ function TapMessageInput({ value, onChange }) {
 function TapInteractionsSection({ settings, onChange }) {
     const [modelInfo, setModelInfo] = useState(() => window.live2dPlusModelInfo || readRuntimeModelInfo(window.live2dPlusModel));
 
+    const refreshModelInfo = useCallback(() => {
+        const detail = readRuntimeModelInfo(window.live2dPlusModel);
+        window.live2dPlusModelInfo = detail;
+        setModelInfo(detail);
+        return detail;
+    }, []);
+
     useEffect(() => {
         const updateModelInfo = (event) => setModelInfo(event.detail || readRuntimeModelInfo(window.live2dPlusModel));
         window.addEventListener(LIVE2D_MODEL_INFO_EVENT, updateModelInfo);
-        updateModelInfo({ detail: window.live2dPlusModelInfo || readRuntimeModelInfo(window.live2dPlusModel) });
+        refreshModelInfo();
         return () => window.removeEventListener(LIVE2D_MODEL_INFO_EVENT, updateModelInfo);
-    }, []);
+    }, [refreshModelInfo]);
+
+    useEffect(() => {
+        refreshModelInfo();
+    }, [refreshModelInfo, settings.modelSource, settings.customModelUrl, settings.localModelPath, settings.reloadKey]);
 
     const motionOptions = Object.entries(modelInfo?.motions || {}).flatMap(([groupName, motions]) => (
         motions.map((motion, index) => ({
@@ -647,10 +671,19 @@ function TapInteractionsSection({ settings, onChange }) {
                 onChange={(value) => updateTapInteractions({ autoSend: value })}
             />
 
+            <div className="tap-meta">
+                <small>
+                    {modelInfo?.name ? `${modelInfo.name}: ${hitAreas.length} hit area${hitAreas.length === 1 ? '' : 's'}` : 'No active model loaded.'}
+                </small>
+                <button className="menu_button" type="button" onClick={refreshModelInfo}>
+                    Refresh Hit Areas
+                </button>
+            </div>
+
             <div className="section-caption">Default tap</div>
             <div className="mapping-list compact">
                 {renderMappingRow(
-                    { id: 'default', name: 'Default' },
+                    { id: 'default', name: 'Default / model body' },
                     defaultMapping,
                     updateDefaultMapping,
                 )}
@@ -996,7 +1029,14 @@ function getSillyTavernContext() {
 
 function getSillyTavernScriptUrl() {
     if (typeof document !== 'undefined') {
-        const script = document.querySelector('script[src$="/script.js"], script[src="script.js"], script[src="./script.js"]');
+        const scripts = Array.from(document.querySelectorAll('script[src]'));
+        const script = scripts.find((scriptEl) => {
+            try {
+                return new URL(scriptEl.src, window.location.href).pathname.endsWith('/script.js');
+            } catch {
+                return /(?:^|\/)script\.js(?:$|[?#])/.test(scriptEl.getAttribute('src') || '');
+            }
+        });
         if (script?.src) return script.src;
     }
 
@@ -1247,13 +1287,30 @@ function normalizeRuntimeExpressions(source) {
 }
 
 function normalizeRuntimeHitAreas(source) {
-    const hitAreas = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+    if (Array.isArray(source)) {
+        return source
+            .map((area, index) => {
+                const id = area?.id || area?.Id || area?.name || area?.Name || `hit-area-${index + 1}`;
+                const name = area?.name || area?.Name || area?.id || area?.Id || id;
+                const rawIndex = Number(area?.index);
+                return {
+                    id: String(id),
+                    name: String(name),
+                    index: Number.isFinite(rawIndex) ? rawIndex : index,
+                };
+            })
+            .sort((left, right) => left.index - right.index || left.name.localeCompare(right.name));
+    }
+
+    const hitAreas = source && typeof source === 'object' ? source : {};
     return Object.entries(hitAreas)
-        .map(([id, area]) => {
+        .map(([key, area]) => {
+            const id = area?.name || area?.Name || key;
+            const name = area?.name || area?.Name || key;
             const rawIndex = Number(area?.index);
             return {
                 id: String(id),
-                name: String(area?.name || id),
+                name: String(name),
                 index: Number.isFinite(rawIndex) ? rawIndex : 9999,
             };
         })
@@ -1262,13 +1319,18 @@ function normalizeRuntimeHitAreas(source) {
 
 function readRuntimeModelInfo(model) {
     const internalSettings = model?.internalModel?.settings || {};
+    const hitAreaSource = model?.internalModel?.hitAreas
+        || internalSettings.hitAreas
+        || internalSettings.hit_areas
+        || [];
+
     return {
-        name: internalSettings.name || 'Active Model',
+        name: model ? internalSettings.name || 'Active Model' : '',
         motions: normalizeRuntimeMotions(internalSettings.motions || model?.internalModel?.motionManager?.definitions),
         expressions: normalizeRuntimeExpressions(
             internalSettings.expressions || model?.internalModel?.motionManager?.expressionManager?.definitions
         ),
-        hitAreas: normalizeRuntimeHitAreas(internalSettings.hitAreas || model?.internalModel?.hitAreas),
+        hitAreas: normalizeRuntimeHitAreas(hitAreaSource),
     };
 }
 
@@ -1371,15 +1433,18 @@ function Live2DCanvas({ settings, onPositionCommit }) {
         tapEventGuardRef.current = { key, time: now };
 
         const mapping = resolveTapInteractionMapping(model, liveSettings, normalizedHitAreas);
-        if (!hasTapMappingValue(mapping)) return;
+        const hasMapping = hasTapMappingValue(mapping);
 
-        console.debug('[Live2D+ Tap] Interaction:', {
+        console.log('[Live2D+ Tap] Model touched:', {
             hitAreas: normalizedHitAreas,
             selectedHitArea: mapping.hitArea?.name || 'default',
+            mapped: hasMapping,
             motion: mapping.motion || '',
             expression: mapping.expression || '',
             hasMessage: !!mapping.message,
         });
+
+        if (!hasMapping) return;
 
         applyTapInteraction(model, liveSettings, mapping, previousInteractionRef)
             .catch((error) => console.error('[Live2D+ Tap] Interaction failed:', error));
@@ -1419,12 +1484,14 @@ function Live2DCanvas({ settings, onPositionCommit }) {
         let cancelled = false;
 
         function destroyCurrent() {
+            const hadRuntimeModel = !!modelRef.current || !!window.live2dPlusModel;
             if (modelRef.current) {
                 try { modelRef.current.__live2dPlusTapCleanup?.(); } catch (_) { /* noop */ }
                 try { modelRef.current.destroy?.(); } catch (_) { /* noop */ }
                 modelRef.current = null;
-                window.live2dPlusModel = null;
             }
+            window.live2dPlusModel = null;
+            if (hadRuntimeModel) dispatchRuntimeModelInfo(null);
             if (appRef.current) {
                 try { appRef.current.destroy(true, { children: true, texture: true, baseTexture: true }); } catch (_) { /* noop */ }
                 appRef.current = null;
