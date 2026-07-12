@@ -148,6 +148,26 @@ export const LIVE2D_PLUS_SETTINGS_STYLES = `
 
 const EMPTY_MODEL_INFO = Object.freeze({ name: '', motions: {}, expressions: [], hitAreas: [] });
 
+function modelInfoSignature(info = EMPTY_MODEL_INFO) {
+    const motions = Object.entries(info?.motions || {})
+        .map(([groupName, groupMotions]) => [groupName, Array.isArray(groupMotions) ? groupMotions.length : 0])
+        .sort(([left], [right]) => left.localeCompare(right));
+    const expressions = Array.isArray(info?.expressions) ? info.expressions.map((expression, index) => getExpressionLabel(expression, index)) : [];
+    const hitAreas = Array.isArray(info?.hitAreas)
+        ? info.hitAreas.map((hitArea) => `${hitArea.id || ''}:${hitArea.name || ''}:${hitArea.index ?? ''}`)
+        : [];
+
+    return JSON.stringify({ name: info?.name || '', motions, expressions, hitAreas });
+}
+
+function setModelInfoIfChanged(setModelInfo, nextInfo) {
+    const next = nextInfo || EMPTY_MODEL_INFO;
+    setModelInfo((current) => (
+        modelInfoSignature(current) === modelInfoSignature(next) ? current : next
+    ));
+    return next;
+}
+
 function readLiveModelInfo(readRuntimeModelInfo) {
     if (typeof window === 'undefined' || typeof readRuntimeModelInfo !== 'function') {
         return EMPTY_MODEL_INFO;
@@ -465,9 +485,12 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
 
     useEffect(() => {
         if (typeof window === 'undefined') return undefined;
-        const updateModelInfo = (event) => setModelInfo(event.detail || readLiveModelInfo(readRuntimeModelInfo));
+        const updateModelInfo = (event) => setModelInfoIfChanged(
+            setModelInfo,
+            event.detail || readLiveModelInfo(readRuntimeModelInfo),
+        );
         window.addEventListener(modelInfoEventName, updateModelInfo);
-        updateModelInfo({ detail: readLiveModelInfo(readRuntimeModelInfo) });
+        setModelInfoIfChanged(setModelInfo, readLiveModelInfo(readRuntimeModelInfo));
         return () => window.removeEventListener(modelInfoEventName, updateModelInfo);
     }, [modelInfoEventName, readRuntimeModelInfo]);
 
@@ -660,19 +683,22 @@ export function TapInteractionsSection({ settings, onChange, readRuntimeModelInf
 
     const refreshModelInfo = useCallback(() => {
         if (typeof window === 'undefined' || typeof readRuntimeModelInfo !== 'function') {
-            setModelInfo(EMPTY_MODEL_INFO);
+            setModelInfoIfChanged(setModelInfo, EMPTY_MODEL_INFO);
             return EMPTY_MODEL_INFO;
         }
 
         const detail = readRuntimeModelInfo(window.live2dPlusModel);
         window.live2dPlusModelInfo = detail;
-        setModelInfo(detail);
+        setModelInfoIfChanged(setModelInfo, detail);
         return detail;
     }, [readRuntimeModelInfo]);
 
     useEffect(() => {
         if (typeof window === 'undefined') return undefined;
-        const updateModelInfo = (event) => setModelInfo(event.detail || readLiveModelInfo(readRuntimeModelInfo));
+        const updateModelInfo = (event) => setModelInfoIfChanged(
+            setModelInfo,
+            event.detail || readLiveModelInfo(readRuntimeModelInfo),
+        );
         window.addEventListener(modelInfoEventName, updateModelInfo);
         refreshModelInfo();
         return () => window.removeEventListener(modelInfoEventName, updateModelInfo);

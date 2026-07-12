@@ -721,7 +721,11 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     // Sync position from settings when not dragging
     useEffect(() => {
         if (!dragStateRef.current) {
-            setPos({ x: settings.positionX, y: settings.positionY });
+            setPos((current) => (
+                current.x === settings.positionX && current.y === settings.positionY
+                    ? current
+                    : { x: settings.positionX, y: settings.positionY }
+            ));
         }
     }, [settings.positionX, settings.positionY]);
 
@@ -1148,11 +1152,11 @@ function Live2DCanvas({ settings, onPositionCommit }) {
             cleanup();
             dragStateRef.current = null;
 
-            if (dragState.dragging) {
-                event.preventDefault();
-                event.stopPropagation();
-                event.stopImmediatePropagation?.();
-            }
+            if (!dragState.dragging) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
 
             setPos((latest) => {
                 onPositionCommit?.({
