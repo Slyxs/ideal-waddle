@@ -27,6 +27,9 @@ const LIVE2D_MODEL_INFO_EVENT = 'Live2DPlusModelInfoChanged';
 const LIVE2D_MOTION_PRIORITY_FORCE = 3;
 const DEFAULT_STATE_RESET_DELAY_MS = 1800;
 const DRAG_START_THRESHOLD_PX = 4;
+// Window (ms) after a drag ends during which the model's trailing tap/click
+// event is ignored so releasing a drag never fires a tap interaction.
+const DRAG_TAP_SUPPRESSION_MS = 350;
 const LIVE2D_PLUS_NO_IDLE_GROUP = '__live2dPlusNoIdleAfterPlayback__';
 let sillyTavernScriptPromise = null;
 
@@ -673,6 +676,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     const captionControllerRef = useRef(null);
     const previousInteractionRef = useRef({ message: '' });
     const tapEventGuardRef = useRef({ key: '', time: 0 });
+    const justDraggedRef = useRef(0);
     const [status, setStatus] = useState({ state: 'loading', message: 'Initializing...' });
     const [pos, setPos] = useState({ x: settings.positionX, y: settings.positionY });
 
@@ -747,6 +751,11 @@ function Live2DCanvas({ settings, onPositionCommit }) {
         const model = modelRef.current;
         const liveSettings = currentSettingsRef.current || settings;
         if (!model || liveSettings?.tapInteractions?.enabled === false) return;
+
+        // A pointer release that ends a drag also fires the model's tap/click
+        // events. Ignore those so dragging the model never sends a tap message.
+        if (dragStateRef.current?.dragging) return;
+        if (Date.now() - justDraggedRef.current < DRAG_TAP_SUPPRESSION_MS) return;
 
         const normalizedHitAreas = normalizeHitAreaNames(hitAreas);
         const key = normalizedHitAreas.slice().sort().join('|') || '__default__';
@@ -1139,10 +1148,11 @@ function Live2DCanvas({ settings, onPositionCommit }) {
 
             const xOffset = (deltaX / Math.max(window.innerWidth, 1)) * 100;
             const yOffset = (deltaY / Math.max(window.innerHeight, 1)) * 100;
-            setPos({
-                x: Math.min(100, Math.max(0, dragState.startX + xOffset)),
-                y: Math.min(100, Math.max(0, dragState.startY + yOffset)),
-            });
+            const nextX = Math.min(100, Math.max(0, dragState.startX + xOffset));
+            const nextY = Math.min(100, Math.max(0, dragState.startY + yOffset));
+            dragState.currentX = nextX;
+            dragState.currentY = nextY;
+            setPos({ x: nextX, y: nextY });
         };
 
         const handleWindowPointerUp = (event) => {
@@ -1154,16 +1164,20 @@ function Live2DCanvas({ settings, onPositionCommit }) {
 
             if (!dragState.dragging) return;
 
+            // Mark the drag end so the model's trailing tap/click is suppressed.
+            justDraggedRef.current = Date.now();
+
             event.preventDefault();
             event.stopPropagation();
             event.stopImmediatePropagation?.();
 
-            setPos((latest) => {
-                onPositionCommit?.({
-                    positionX: Number(latest.x.toFixed(2)),
-                    positionY: Number(latest.y.toFixed(2)),
-                });
-                return latest;
+            // Commit the final position outside of a state updater. Calling the
+            // parent's onChange from inside a setPos updater updates another
+            // component during render, which triggers React error #185
+            // (maximum update depth exceeded).
+            onPositionCommit?.({
+                positionX: Number(dragState.currentX.toFixed(2)),
+                positionY: Number(dragState.currentY.toFixed(2)),
             });
         };
 
@@ -1173,6 +1187,8 @@ function Live2DCanvas({ settings, onPositionCommit }) {
             startClientY,
             startX,
             startY,
+            currentX: startX,
+            currentY: startY,
             dragging: false,
             cleanup,
         };
