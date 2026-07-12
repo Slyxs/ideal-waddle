@@ -26,6 +26,7 @@ const TTS_DYNAMIC_TIMESTAMPS_READY_EVENT = 'TTSDynamicTimestampsReady';
 const LIVE2D_MODEL_INFO_EVENT = 'Live2DPlusModelInfoChanged';
 const LIVE2D_MOTION_PRIORITY_FORCE = 3;
 const DEFAULT_STATE_RESET_DELAY_MS = 1800;
+const DRAG_START_THRESHOLD_PX = 4;
 const LIVE2D_PLUS_NO_IDLE_GROUP = '__live2dPlusNoIdleAfterPlayback__';
 let sillyTavernScriptPromise = null;
 
@@ -724,6 +725,11 @@ function Live2DCanvas({ settings, onPositionCommit }) {
         }
     }, [settings.positionX, settings.positionY]);
 
+    useEffect(() => () => {
+        dragStateRef.current?.cleanup?.();
+        dragStateRef.current = null;
+    }, []);
+
     // Apply filters to active model
     const applyFilters = useCallback((s) => {
         const model = modelRef.current;
@@ -1099,48 +1105,78 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     const onPointerDown = useCallback((e) => {
         if (!settings.draggable) return;
         if (e.button !== undefined && e.button !== 0) return;
-        dragStateRef.current = {
-            pointerId: e.pointerId,
-            startClientX: e.clientX,
-            startClientY: e.clientY,
-            startX: pos.x,
-            startY: pos.y,
-            moved: false,
+
+        dragStateRef.current?.cleanup?.();
+
+        const pointerId = e.pointerId;
+        const startClientX = e.clientX;
+        const startClientY = e.clientY;
+        const startX = pos.x;
+        const startY = pos.y;
+
+        const cleanup = () => {
+            window.removeEventListener('pointermove', handleWindowPointerMove, true);
+            window.removeEventListener('pointerup', handleWindowPointerUp, true);
+            window.removeEventListener('pointercancel', handleWindowPointerUp, true);
         };
-        e.currentTarget.setPointerCapture?.(e.pointerId);
-    }, [settings.draggable, pos.x, pos.y]);
 
-    const onPointerMove = useCallback((e) => {
-        const ds = dragStateRef.current;
-        if (!ds || ds.pointerId !== e.pointerId) return;
-        e.preventDefault();
-        e.stopPropagation();
-        ds.moved = true;
-        const dx = ((e.clientX - ds.startClientX) / Math.max(window.innerWidth, 1)) * 100;
-        const dy = ((e.clientY - ds.startClientY) / Math.max(window.innerHeight, 1)) * 100;
-        setPos({
-            x: Math.min(100, Math.max(0, ds.startX + dx)),
-            y: Math.min(100, Math.max(0, ds.startY + dy)),
-        });
-    }, []);
+        const handleWindowPointerMove = (event) => {
+            const dragState = dragStateRef.current;
+            if (!dragState || dragState.pointerId !== event.pointerId) return;
 
-    const onPointerUp = useCallback((e) => {
-        const ds = dragStateRef.current;
-        if (!ds || ds.pointerId !== e.pointerId) return;
-        dragStateRef.current = null;
-        e.currentTarget.releasePointerCapture?.(e.pointerId);
-        if (ds.moved) {
-            e.preventDefault();
-            e.stopPropagation();
-        }
-        setPos((latest) => {
-            onPositionCommit?.({
-                positionX: Number(latest.x.toFixed(2)),
-                positionY: Number(latest.y.toFixed(2)),
+            const deltaX = event.clientX - dragState.startClientX;
+            const deltaY = event.clientY - dragState.startClientY;
+            if (!dragState.dragging && Math.hypot(deltaX, deltaY) < DRAG_START_THRESHOLD_PX) return;
+
+            dragState.dragging = true;
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+
+            const xOffset = (deltaX / Math.max(window.innerWidth, 1)) * 100;
+            const yOffset = (deltaY / Math.max(window.innerHeight, 1)) * 100;
+            setPos({
+                x: Math.min(100, Math.max(0, dragState.startX + xOffset)),
+                y: Math.min(100, Math.max(0, dragState.startY + yOffset)),
             });
-            return latest;
-        });
-    }, [onPositionCommit]);
+        };
+
+        const handleWindowPointerUp = (event) => {
+            const dragState = dragStateRef.current;
+            if (!dragState || dragState.pointerId !== event.pointerId) return;
+
+            cleanup();
+            dragStateRef.current = null;
+
+            if (dragState.dragging) {
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation?.();
+            }
+
+            setPos((latest) => {
+                onPositionCommit?.({
+                    positionX: Number(latest.x.toFixed(2)),
+                    positionY: Number(latest.y.toFixed(2)),
+                });
+                return latest;
+            });
+        };
+
+        dragStateRef.current = {
+            pointerId,
+            startClientX,
+            startClientY,
+            startX,
+            startY,
+            dragging: false,
+            cleanup,
+        };
+
+        window.addEventListener('pointermove', handleWindowPointerMove, true);
+        window.addEventListener('pointerup', handleWindowPointerUp, true);
+        window.addEventListener('pointercancel', handleWindowPointerUp, true);
+    }, [onPositionCommit, settings.draggable, pos.x, pos.y]);
 
     const wrapperStyle = {
         position: 'fixed',
@@ -1161,9 +1197,6 @@ function Live2DCanvas({ settings, onPositionCommit }) {
             style={wrapperStyle}
             data-live2dplus-root="true"
             onPointerDown={onPointerDown}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerCancel={onPointerUp}
         >
             <div
                 ref={containerRef}
