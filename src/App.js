@@ -2,725 +2,21 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { normalizeSettings, resolveModelUrl, MODEL_SOURCES, CAPTION_STYLE_OPTIONS } from './settings';
 import { EXTENSION_WEB_PATH } from './stt';
-import { fetchOpenAiModels } from './dynamicAnalysis';
 import { loadLive2DRuntime, buildFilters, applyModelTransform, applyModelInteraction, muteModelMotionAudio } from './live2d';
 import { createLive2DCaptionController } from './captions';
-
-const LIVE2D_PLUS_SETTINGS_STYLES = `
-.live2d-plus-settings .field,
-.live2d-plus-settings .inline-control {
-    display: block;
-    margin-bottom: 8px;
-}
-
-.live2d-plus-settings .field > span,
-.live2d-plus-settings .inline-control > span,
-.live2d-plus-settings .section-caption {
-    display: block;
-    margin-bottom: 4px;
-    font-size: 0.85em;
-    font-weight: 700;
-    opacity: 0.72;
-}
-
-.live2d-plus-settings .inline-actions,
-.live2d-plus-settings .row-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.live2d-plus-settings .inline-actions .text_pole {
-    flex: 1 1 auto;
-    min-width: 0;
-}
-
-.live2d-plus-settings .hint {
-    margin: 4px 0 8px;
-    font-size: 0.82em;
-    opacity: 0.62;
-}
-
-.live2d-plus-settings .mapping-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    max-height: 360px;
-    overflow-y: auto;
-    padding-right: 2px;
-    margin-bottom: 10px;
-}
-
-.live2d-plus-settings .mapping-list.compact {
-    max-height: none;
-}
-
-.live2d-plus-settings .mapping-row {
-    display: grid;
-    grid-template-columns: minmax(96px, 1fr) minmax(120px, 1fr) minmax(120px, 1fr) auto;
-    gap: 6px;
-    align-items: end;
-    padding: 6px;
-    border: 1px solid rgba(128, 128, 128, 0.25);
-    border-radius: 6px;
-}
-
-.live2d-plus-settings .mapping-row.tap-row {
-    grid-template-columns: minmax(96px, 0.8fr) 1fr;
-    align-items: start;
-}
-
-.live2d-plus-settings .tap-fields {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.live2d-plus-settings .tap-selects {
-    display: grid;
-    grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr);
-    gap: 6px;
-}
-
-.live2d-plus-settings .tap-fields textarea.text_pole {
-    min-height: 54px;
-    resize: vertical;
-}
-
-.live2d-plus-settings .tap-meta {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    margin: 4px 0 8px;
-}
-
-.live2d-plus-settings .tap-meta small {
-    min-width: 0;
-    opacity: 0.62;
-}
-
-.live2d-plus-settings .priority-row {
-    grid-template-columns: 1fr auto;
-    align-items: center;
-}
-
-.live2d-plus-settings .compact-field {
-    margin-bottom: 0;
-}
-
-.live2d-plus-settings .mapping-row .text_pole {
-    width: 100%;
-}
-
-@media (max-width: 640px) {
-    .live2d-plus-settings .mapping-row {
-        grid-template-columns: 1fr;
-        align-items: stretch;
-    }
-}
-`;
-
-// ---------------------------------------------------------------------------
-// Shared UI primitives
-// ---------------------------------------------------------------------------
-
-function CheckboxRow({ label, checked, onChange }) {
-    return (
-        <label className="checkbox_label" style={{ marginBottom: '4px' }}>
-            <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-            <span>{label}</span>
-        </label>
-    );
-}
-
-function Slider({ label, value, min, max, step, onChange, displayValue }) {
-    const display = displayValue !== undefined ? displayValue : value;
-    return (
-        <div style={{ marginBottom: '8px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
-                <small>{label}</small>
-                <small style={{ opacity: 0.7 }}>{display}</small>
-            </div>
-            <input
-                type="range"
-                min={min}
-                max={max}
-                step={step}
-                value={value}
-                onChange={(e) => onChange(Number(e.target.value))}
-                style={{ width: '100%' }}
-            />
-        </div>
-    );
-}
-
-function formatNumber(value, digits = 2) {
-    return Number(value).toFixed(digits).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
-}
-
-function ColorInput({ label, value, onChange }) {
-    return (
-        <div style={{ marginBottom: '8px' }}>
-            <small style={{ display: 'block', marginBottom: '2px' }}>{label}</small>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <input
-                    type="color"
-                    value={value}
-                    onChange={(e) => onChange(e.target.value)}
-                    style={{ width: '36px', height: '28px', cursor: 'pointer', border: 'none', background: 'none' }}
-                />
-                <input
-                    type="text"
-                    className="text_pole"
-                    value={value}
-                    onChange={(e) => onChange(e.target.value)}
-                    style={{ flex: 1, fontFamily: 'monospace', fontSize: '0.9em' }}
-                />
-            </div>
-        </div>
-    );
-}
-
-// Uses ST's inline-drawer classes so ST's jQuery handles expand/collapse.
-// Content starts hidden via ST's .inline-drawer-content { display: none } CSS rule.
-function SubDrawer({ title, children }) {
-    return (
-        <div className="inline-drawer" style={{ marginTop: '6px' }}>
-            <div className="inline-drawer-toggle inline-drawer-header" style={{ padding: '4px 0' }}>
-                <b style={{ fontSize: '0.9em' }}>{title}</b>
-                <div className="inline-drawer-icon fa-solid fa-circle-chevron-down down" />
-            </div>
-            <div className="inline-drawer-content" style={{ paddingTop: '6px', paddingBottom: '2px' }}>
-                {children}
-            </div>
-        </div>
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Motion & Expression tester
-// ---------------------------------------------------------------------------
-
-function getMotionLabel(motion, index) {
-    const raw = typeof motion === 'string'
-        ? motion
-        : motion?.File || motion?.file || motion?.name || motion?.Name || `Motion ${index + 1}`;
-    return String(raw).replace(/\.(mtn|json)$/i, '');
-}
-
-function getExpressionLabel(expr, index) {
-    if (typeof expr === 'string') return expr.replace(/\.(exp3?|json)$/i, '');
-    return expr?.name || expr?.Name || expr?.File || expr?.file || `Expression ${index}`;
-}
-
-function MotionTestSection() {
-    const [modelInfo, setModelInfo] = useState({ name: '', motions: {}, expressions: [], message: '' });
-    const resetTimerRef = useRef(0);
-
-    const clearTestReset = useCallback(() => {
-        if (resetTimerRef.current && typeof window !== 'undefined') {
-            window.clearTimeout(resetTimerRef.current);
-        }
-        resetTimerRef.current = 0;
-    }, []);
-
-    const scheduleTestReset = useCallback((model, delayMs = DEFAULT_STATE_RESET_DELAY_MS) => {
-        clearTestReset();
-        if (!model) return;
-        if (typeof window === 'undefined') {
-            resetDynamicState(model);
-            return;
-        }
-
-        const safeDelay = Math.min(Math.max(Number(delayMs) || 0, 0), 60000);
-        resetTimerRef.current = window.setTimeout(() => {
-            resetTimerRef.current = 0;
-            resetDynamicState(model);
-        }, safeDelay);
-    }, [clearTestReset]);
-
-    useEffect(() => clearTestReset, [clearTestReset]);
-
-    const refresh = useCallback(() => {
-        const model = window.live2dPlusModel;
-        if (!model) {
-            setModelInfo({ name: '', motions: {}, expressions: [], message: 'No Live2D model loaded yet.' });
-            return;
-        }
-
-        const internalSettings = model.internalModel?.settings || {};
-        const rawMotions = internalSettings.motions || model.internalModel?.motionManager?.definitions || {};
-        const motions = {};
-        for (const [group, list] of Object.entries(rawMotions)) {
-            if (Array.isArray(list) && list.length > 0) motions[group] = list;
-        }
-
-        const expSource = internalSettings.expressions
-            || model.internalModel?.motionManager?.expressionManager?.definitions
-            || [];
-        const expressions = Array.isArray(expSource)
-            ? expSource
-            : expSource && typeof expSource === 'object'
-                ? Object.values(expSource).filter(Boolean)
-                : [];
-
-        const name = internalSettings.name || 'Active Model';
-        const hasAny = Object.keys(motions).length > 0 || expressions.length > 0;
-        setModelInfo({ name, motions, expressions, message: hasAny ? '' : 'No motions or expressions found.' });
-    }, []);
-
-    async function playMotion(group, index) {
-        const model = window.live2dPlusModel;
-        if (!model?.motion) return;
-
-        const motionManager = getMotionManager(model);
-        let resetHandled = false;
-        let detachMotionFinish = () => {};
-
-        const resetOnce = () => {
-            if (resetHandled) return;
-            resetHandled = true;
-            detachMotionFinish();
-            clearTestReset();
-            resetDynamicState(model);
-        };
-
-        try {
-            clearTestReset();
-            stopModelMotionsOnly(model);
-
-            if (motionManager?.on) {
-                const handleMotionFinish = () => resetOnce();
-                motionManager.on('motionFinish', handleMotionFinish);
-                detachMotionFinish = () => {
-                    try { motionManager.off?.('motionFinish', handleMotionFinish); } catch { /* noop */ }
-                    try { motionManager.removeListener?.('motionFinish', handleMotionFinish); } catch { /* noop */ }
-                };
-            }
-
-            let fallbackDelay = DEFAULT_STATE_RESET_DELAY_MS;
-            try {
-                const motion = await motionManager?.loadMotion?.(group, index);
-                fallbackDelay = readMotionDurationMs(motion);
-            } catch { /* use fallback */ }
-
-            clearTestReset();
-            if (typeof window === 'undefined') {
-                resetOnce();
-            } else {
-                const safeDelay = Math.min(Math.max(Number(fallbackDelay) || 0, 0), 60000) + 250;
-                resetTimerRef.current = window.setTimeout(resetOnce, safeDelay);
-            }
-            const result = model.motion(group, index, undefined, { volume: 0 });
-            Promise.resolve(result)
-                .then((started) => {
-                    if (started === false) resetOnce();
-                })
-                .catch((err) => {
-                    console.error('[Live2D+] Motion error:', err);
-                    resetOnce();
-                });
-        } catch (err) {
-            console.error('[Live2D+] Motion error:', err);
-            resetOnce();
-        }
-    }
-
-    function playExpression(index) {
-        const model = window.live2dPlusModel;
-        if (!model?.expression) return;
-
-        try {
-            clearTestReset();
-            const result = model.expression(index);
-            Promise.resolve(result)
-                .catch((err) => console.error('[Live2D+] Expression error:', err))
-                .finally(() => scheduleTestReset(model));
-        } catch (err) {
-            console.error('[Live2D+] Expression error:', err);
-            scheduleTestReset(model);
-        }
-    }
-
-    const btnStyle = { fontSize: '0.8em', padding: '2px 8px', marginBottom: '4px' };
-
-    return (
-        <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-                {modelInfo.name && <small style={{ opacity: 0.6 }}>{modelInfo.name}</small>}
-                <div className="menu_button" onClick={refresh} title="Load motions/expressions from active model">
-                    <i className="fa-solid fa-rotate" style={{ marginRight: '4px' }} />
-                    Refresh
-                </div>
-            </div>
-
-            {modelInfo.message && (
-                <small style={{ opacity: 0.6, display: 'block', marginBottom: '6px' }}>{modelInfo.message}</small>
-            )}
-
-            {modelInfo.expressions.length > 0 && (
-                <div style={{ marginBottom: '10px' }}>
-                    <small style={{ opacity: 0.7, display: 'block', marginBottom: '4px' }}>
-                        <strong>Expressions</strong>
-                    </small>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                        {modelInfo.expressions.map((expr, i) => (
-                            <div key={i} className="menu_button" onClick={() => playExpression(i)} style={btnStyle}>
-                                {getExpressionLabel(expr, i)}
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
-
-            {Object.entries(modelInfo.motions).map(([group, motions]) => (
-                <div key={group} style={{ marginBottom: '8px' }}>
-                    <small style={{ opacity: 0.7, display: 'block', marginBottom: '4px' }}>
-                        <strong>{group.replace(/_/g, ' ')}</strong>
-                    </small>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                        {motions.map((motion, i) => (
-                            <div key={i} className="menu_button" onClick={() => playMotion(group, i)} style={btnStyle}>
-                                {getMotionLabel(motion, i)}
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            ))}
-        </div>
-    );
-}
-
-function MappingSelect({ label, value, options, onChange }) {
-    return (
-        <label className="inline-control">
-            <span>{label}</span>
-            <select className="text_pole" value={value || ''} onChange={(event) => onChange(event.target.value)}>
-                <option value="">None</option>
-                {options.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-            </select>
-        </label>
-    );
-}
-
-function DynamicSettingsSection({ settings, onChange }) {
-    const [modelInfo, setModelInfo] = useState(() => window.live2dPlusModelInfo || readRuntimeModelInfo(window.live2dPlusModel));
-    const [availableModels, setAvailableModels] = useState([]);
-    const [modelFetchState, setModelFetchState] = useState({ loading: false, message: '' });
-
-    useEffect(() => {
-        const updateModelInfo = (event) => setModelInfo(event.detail || readRuntimeModelInfo(window.live2dPlusModel));
-        window.addEventListener(LIVE2D_MODEL_INFO_EVENT, updateModelInfo);
-        updateModelInfo({ detail: window.live2dPlusModelInfo || readRuntimeModelInfo(window.live2dPlusModel) });
-        return () => window.removeEventListener(LIVE2D_MODEL_INFO_EVENT, updateModelInfo);
-    }, []);
-
-    const motionOptions = Object.entries(modelInfo?.motions || {}).flatMap(([groupName, motions]) => (
-        motions.map((motion, index) => ({
-            value: `${groupName}:${index}`,
-            label: `${groupName} / ${getMotionLabel(motion, index)}`,
-        }))
-    ));
-    const expressionOptions = (modelInfo?.expressions || []).map((expression, index) => ({
-        value: String(index),
-        label: getExpressionLabel(expression, index),
-    }));
-
-    const update = (patch) => onChange({ ...settings, ...patch });
-    const updateDisable = (key, value) => update({ disableSettings: { ...settings.disableSettings, [key]: value } });
-    const updateEmotionMapping = (emotion, patch) => update({
-        emotionMappings: {
-            ...settings.emotionMappings,
-            [emotion]: { ...(settings.emotionMappings?.[emotion] || {}), ...patch },
-        },
-    });
-    const updateActionMapping = (index, patch) => update({
-        actionMappings: settings.actionMappings.map((action, actionIndex) => (
-            actionIndex === index ? { ...action, ...patch } : action
-        )),
-    });
-    const movePriority = (index, direction) => {
-        const next = [...settings.priorityList];
-        const target = index + direction;
-        if (target < 0 || target >= next.length) return;
-        [next[index], next[target]] = [next[target], next[index]];
-        update({ priorityList: next.map((item, itemIndex) => ({ ...item, priority: next.length - itemIndex })) });
-    };
-
-    const addActionMapping = () => update({
-        actionMappings: [
-            ...settings.actionMappings,
-            { id: `action-${Date.now()}`, description: '', motion: '', expression: '' },
-        ],
-    });
-
-    const removeActionMapping = (index) => update({
-        actionMappings: settings.actionMappings.filter((_, actionIndex) => actionIndex !== index),
-    });
-
-    const fetchModels = async () => {
-        setModelFetchState({ loading: true, message: 'Fetching models...' });
-        try {
-            const models = await fetchOpenAiModels({ baseUrl: settings.analysisBaseUrl, apiKey: settings.analysisApiKey });
-            setAvailableModels(models);
-            if (models.length > 0 && !settings.analysisModel) update({ analysisModel: models[0].id });
-            setModelFetchState({ loading: false, message: `${models.length} model${models.length === 1 ? '' : 's'} found.` });
-        } catch (error) {
-            setModelFetchState({ loading: false, message: error?.message || 'Failed to fetch models.' });
-        }
-    };
-
-    return (
-        <SubDrawer title="Dynamic Analysis" defaultOpen={false}>
-            <CheckboxRow
-                label="Route SillyTavern TTS to Live2D"
-                checked={settings.routeTtsToLive2D}
-                onChange={(value) => update({ routeTtsToLive2D: value })}
-            />
-            <CheckboxRow
-                label="Prevent original SillyTavern playback"
-                checked={settings.blockOriginalTtsPlayback}
-                onChange={(value) => update({ blockOriginalTtsPlayback: value })}
-            />
-            <CheckboxRow
-                label="Dynamic emotion/action mode"
-                checked={settings.dynamicMode}
-                onChange={(value) => update({ dynamicMode: value })}
-            />
-            <CheckboxRow
-                label="Reset expression after playback"
-                checked={settings.resetExpressionAfterPlayback}
-                onChange={(value) => update({ resetExpressionAfterPlayback: value })}
-            />
-
-            <label className="field">
-                <span>OpenAI-compatible URL</span>
-                <input
-                    className="text_pole"
-                    type="url"
-                    value={settings.analysisBaseUrl}
-                    onChange={(event) => update({ analysisBaseUrl: event.target.value })}
-                    placeholder="https://proxy.example.com/v1"
-                />
-            </label>
-            <label className="field">
-                <span>API key</span>
-                <input
-                    className="text_pole"
-                    type="password"
-                    value={settings.analysisApiKey}
-                    onChange={(event) => update({ analysisApiKey: event.target.value })}
-                    placeholder="Optional bearer token"
-                />
-            </label>
-            <label className="field">
-                <span>Analysis model</span>
-                <div className="inline-actions">
-                    <select
-                        className="text_pole"
-                        value={settings.analysisModel}
-                        onChange={(event) => update({ analysisModel: event.target.value })}
-                    >
-                        <option value={settings.analysisModel}>{settings.analysisModel || 'Select a model'}</option>
-                        {availableModels.map((model) => (
-                            <option key={model.id} value={model.id}>{model.name || model.id}</option>
-                        ))}
-                    </select>
-                    <button className="menu_button" type="button" onClick={fetchModels} disabled={modelFetchState.loading}>
-                        {modelFetchState.loading ? 'Fetching...' : 'Fetch Models'}
-                    </button>
-                </div>
-            </label>
-            {modelFetchState.message && <div className="hint">{modelFetchState.message}</div>}
-
-            <div className="section-caption">Disable cue sources</div>
-            <CheckboxRow label="Emotion motions" checked={!settings.disableSettings.emotionMotions} onChange={(value) => updateDisable('emotionMotions', !value)} />
-            <CheckboxRow label="Emotion expressions" checked={!settings.disableSettings.emotionExpressions} onChange={(value) => updateDisable('emotionExpressions', !value)} />
-            <CheckboxRow label="Action motions" checked={!settings.disableSettings.actionMotions} onChange={(value) => updateDisable('actionMotions', !value)} />
-            <CheckboxRow label="Action expressions" checked={!settings.disableSettings.actionExpressions} onChange={(value) => updateDisable('actionExpressions', !value)} />
-
-            <div className="section-caption">Priority</div>
-            <div className="mapping-list compact">
-                {settings.priorityList.map((item, index) => (
-                    <div className="mapping-row priority-row" key={`${item.type}-${item.target}`}>
-                        <span>{item.label}</span>
-                        <div className="row-actions">
-                            <button className="menu_button" type="button" onClick={() => movePriority(index, -1)} disabled={index === 0}>Up</button>
-                            <button className="menu_button" type="button" onClick={() => movePriority(index, 1)} disabled={index === settings.priorityList.length - 1}>Down</button>
-                        </div>
-                    </div>
-                ))}
-            </div>
-
-            <div className="section-caption">Emotion mappings</div>
-            <div className="mapping-list">
-                {settings.emotionLabels.map((emotion) => {
-                    const mapping = settings.emotionMappings?.[emotion] || {};
-                    return (
-                        <div className="mapping-row" key={emotion}>
-                            <strong>{emotion}</strong>
-                            <MappingSelect label="Motion" value={mapping.motion} options={motionOptions} onChange={(value) => updateEmotionMapping(emotion, { motion: value })} />
-                            <MappingSelect label="Expression" value={mapping.expression} options={expressionOptions} onChange={(value) => updateEmotionMapping(emotion, { expression: value })} />
-                        </div>
-                    );
-                })}
-            </div>
-
-            <div className="section-caption">Action mappings</div>
-            <div className="mapping-list">
-                {settings.actionMappings.map((action, index) => (
-                    <div className="mapping-row" key={action.id || index}>
-                        <label className="field compact-field">
-                            <span>Action</span>
-                            <input
-                                className="text_pole"
-                                type="text"
-                                value={action.description || ''}
-                                onChange={(event) => updateActionMapping(index, { description: event.target.value })}
-                                placeholder="laughs, sighs, waves..."
-                            />
-                        </label>
-                        <MappingSelect label="Motion" value={action.motion} options={motionOptions} onChange={(value) => updateActionMapping(index, { motion: value })} />
-                        <MappingSelect label="Expression" value={action.expression} options={expressionOptions} onChange={(value) => updateActionMapping(index, { expression: value })} />
-                        <button className="menu_button" type="button" onClick={() => removeActionMapping(index)}>Remove</button>
-                    </div>
-                ))}
-            </div>
-            <button className="menu_button" type="button" onClick={addActionMapping}>Add Action</button>
-        </SubDrawer>
-    );
-}
-
-function TapMessageInput({ value, onChange }) {
-    return (
-        <label className="field compact-field">
-            <span>Message</span>
-            <textarea
-                className="text_pole"
-                rows={2}
-                value={value || ''}
-                onChange={(event) => onChange(event.target.value)}
-                placeholder="Optional user message"
-            />
-        </label>
-    );
-}
-
-function TapInteractionsSection({ settings, onChange }) {
-    const [modelInfo, setModelInfo] = useState(() => window.live2dPlusModelInfo || readRuntimeModelInfo(window.live2dPlusModel));
-
-    const refreshModelInfo = useCallback(() => {
-        const detail = readRuntimeModelInfo(window.live2dPlusModel);
-        window.live2dPlusModelInfo = detail;
-        setModelInfo(detail);
-        return detail;
-    }, []);
-
-    useEffect(() => {
-        const updateModelInfo = (event) => setModelInfo(event.detail || readRuntimeModelInfo(window.live2dPlusModel));
-        window.addEventListener(LIVE2D_MODEL_INFO_EVENT, updateModelInfo);
-        refreshModelInfo();
-        return () => window.removeEventListener(LIVE2D_MODEL_INFO_EVENT, updateModelInfo);
-    }, [refreshModelInfo]);
-
-    useEffect(() => {
-        refreshModelInfo();
-    }, [refreshModelInfo, settings.modelSource, settings.customModelUrl, settings.localModelPath, settings.reloadKey]);
-
-    const motionOptions = Object.entries(modelInfo?.motions || {}).flatMap(([groupName, motions]) => (
-        motions.map((motion, index) => ({
-            value: `${groupName}:${index}`,
-            label: `${groupName} / ${getMotionLabel(motion, index)}`,
-        }))
-    ));
-    const expressionOptions = (modelInfo?.expressions || []).map((expression, index) => ({
-        value: String(index),
-        label: getExpressionLabel(expression, index),
-    }));
-    const hitAreas = Array.isArray(modelInfo?.hitAreas) ? modelInfo.hitAreas : [];
-    const tapInteractions = settings.tapInteractions || {};
-    const defaultMapping = tapInteractions.defaultMapping || {};
-    const hitAreaMappings = tapInteractions.hitAreaMappings || {};
-
-    const updateTapInteractions = (patch) => onChange({
-        ...settings,
-        tapInteractions: { ...tapInteractions, ...patch },
-    });
-    const updateDefaultMapping = (patch) => updateTapInteractions({
-        defaultMapping: { ...defaultMapping, ...patch },
-    });
-    const updateHitAreaMapping = (hitArea, patch) => {
-        const current = hitAreaMappings[hitArea.id] || hitAreaMappings[hitArea.name] || {};
-        updateTapInteractions({
-            hitAreaMappings: {
-                ...hitAreaMappings,
-                [hitArea.id]: { ...current, ...patch },
-            },
-        });
-    };
-
-    const renderMappingRow = ({ id, name }, mapping, updateMapping) => (
-        <div className="mapping-row tap-row" key={id}>
-            <strong>{name}</strong>
-            <div className="tap-fields">
-                <div className="tap-selects">
-                    <MappingSelect label="Motion" value={mapping.motion} options={motionOptions} onChange={(value) => updateMapping({ motion: value })} />
-                    <MappingSelect label="Expression" value={mapping.expression} options={expressionOptions} onChange={(value) => updateMapping({ expression: value })} />
-                </div>
-                <TapMessageInput value={mapping.message} onChange={(value) => updateMapping({ message: value })} />
-            </div>
-        </div>
-    );
-
-    return (
-        <SubDrawer title="Tap Interactions">
-            <CheckboxRow
-                label="Enable tap interactions"
-                checked={tapInteractions.enabled !== false}
-                onChange={(value) => updateTapInteractions({ enabled: value })}
-            />
-            <CheckboxRow
-                label="Auto-send interaction"
-                checked={!!tapInteractions.autoSend}
-                onChange={(value) => updateTapInteractions({ autoSend: value })}
-            />
-
-            <div className="tap-meta">
-                <small>
-                    {modelInfo?.name ? `${modelInfo.name}: ${hitAreas.length} hit area${hitAreas.length === 1 ? '' : 's'}` : 'No active model loaded.'}
-                </small>
-                <button className="menu_button" type="button" onClick={refreshModelInfo}>
-                    Refresh Hit Areas
-                </button>
-            </div>
-
-            <div className="section-caption">Default tap</div>
-            <div className="mapping-list compact">
-                {renderMappingRow(
-                    { id: 'default', name: 'Default / model body' },
-                    defaultMapping,
-                    updateDefaultMapping,
-                )}
-            </div>
-
-            <div className="section-caption">Hit areas</div>
-            {hitAreas.length === 0 ? (
-                <div className="hint">No hit areas found on the active model.</div>
-            ) : (
-                <div className="mapping-list">
-                    {hitAreas.map((hitArea) => renderMappingRow(
-                        hitArea,
-                        hitAreaMappings[hitArea.id] || hitAreaMappings[hitArea.name] || {},
-                        (patch) => updateHitAreaMapping(hitArea, patch),
-                    ))}
-                </div>
-            )}
-        </SubDrawer>
-    );
-}
+import {
+    LIVE2D_PLUS_SETTINGS_STYLES,
+    CheckboxRow,
+    Slider,
+    formatNumber,
+    ColorInput,
+    SubDrawer,
+    MotionTestSection,
+    DynamicSettingsSection,
+    TapInteractionsSection,
+    getMotionLabel,
+    getExpressionLabel,
+} from './ui';
 
 // ---------------------------------------------------------------------------
 // Dynamic Live2D playback helpers
@@ -1802,14 +1098,14 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     // Drag handlers
     const onPointerDown = useCallback((e) => {
         if (!settings.draggable) return;
-        e.preventDefault();
-        e.stopPropagation();
+        if (e.button !== undefined && e.button !== 0) return;
         dragStateRef.current = {
             pointerId: e.pointerId,
             startClientX: e.clientX,
             startClientY: e.clientY,
             startX: pos.x,
             startY: pos.y,
+            moved: false,
         };
         e.currentTarget.setPointerCapture?.(e.pointerId);
     }, [settings.draggable, pos.x, pos.y]);
@@ -1817,6 +1113,9 @@ function Live2DCanvas({ settings, onPositionCommit }) {
     const onPointerMove = useCallback((e) => {
         const ds = dragStateRef.current;
         if (!ds || ds.pointerId !== e.pointerId) return;
+        e.preventDefault();
+        e.stopPropagation();
+        ds.moved = true;
         const dx = ((e.clientX - ds.startClientX) / Math.max(window.innerWidth, 1)) * 100;
         const dy = ((e.clientY - ds.startClientY) / Math.max(window.innerHeight, 1)) * 100;
         setPos({
@@ -1830,6 +1129,10 @@ function Live2DCanvas({ settings, onPositionCommit }) {
         if (!ds || ds.pointerId !== e.pointerId) return;
         dragStateRef.current = null;
         e.currentTarget.releasePointerCapture?.(e.pointerId);
+        if (ds.moved) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
         setPos((latest) => {
             onPositionCommit?.({
                 positionX: Number(latest.x.toFixed(2)),
@@ -1847,11 +1150,21 @@ function Live2DCanvas({ settings, onPositionCommit }) {
         height: `${settings.canvasHeight}px`,
         transform: 'translate(-50%, -50%)',
         zIndex: settings.zIndex,
-        pointerEvents: 'none',
+        pointerEvents: settings.draggable ? 'auto' : 'none',
+        cursor: settings.draggable ? 'grab' : 'default',
+        touchAction: settings.draggable ? 'none' : 'auto',
     };
 
     return (
-        <div ref={rootRef} style={wrapperStyle} data-live2dplus-root="true">
+        <div
+            ref={rootRef}
+            style={wrapperStyle}
+            data-live2dplus-root="true"
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+        >
             <div
                 ref={containerRef}
                 style={{ display: 'block', width: '100%', height: '100%' }}
@@ -1869,33 +1182,6 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                 }}>
                     {status.message}
                 </div>
-            )}
-
-            {settings.draggable && (
-                <button
-                    type="button"
-                    aria-label="Move Live2D model"
-                    onPointerDown={onPointerDown}
-                    onPointerMove={onPointerMove}
-                    onPointerUp={onPointerUp}
-                    onPointerCancel={onPointerUp}
-                    style={{
-                        position: 'absolute',
-                        right: 6, top: 6,
-                        width: 30, height: 30,
-                        borderRadius: '50%',
-                        border: '1px solid rgba(255,255,255,0.2)',
-                        background: 'rgba(0,0,0,0.45)',
-                        color: 'rgba(255,255,255,0.75)',
-                        cursor: 'grab',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        pointerEvents: 'auto',
-                    }}
-                >
-                    <i className="fa-solid fa-arrows-up-down-left-right" style={{ fontSize: 12 }} />
-                </button>
             )}
         </div>
     );
@@ -1980,11 +1266,10 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
                         </div>
 
                         <div
-                            className="menu_button"
+                            className="menu_button full-width-action"
                             onClick={() => onLoadSttModel?.()}
                             style={{
                                 marginTop: '8px',
-                                textAlign: 'center',
                                 opacity: sttModelState.state === 'loading' ? 0.6 : 1,
                                 pointerEvents: sttModelState.state === 'loading' ? 'none' : 'auto',
                             }}
@@ -2018,9 +1303,19 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
                         </small>
                     </SubDrawer>
 
-                    <DynamicSettingsSection settings={s} onChange={set} />
+                    <DynamicSettingsSection
+                        settings={s}
+                        onChange={set}
+                        readRuntimeModelInfo={readRuntimeModelInfo}
+                        modelInfoEventName={LIVE2D_MODEL_INFO_EVENT}
+                    />
 
-                    <TapInteractionsSection settings={s} onChange={set} />
+                    <TapInteractionsSection
+                        settings={s}
+                        onChange={set}
+                        readRuntimeModelInfo={readRuntimeModelInfo}
+                        modelInfoEventName={LIVE2D_MODEL_INFO_EVENT}
+                    />
 
                     {/* -- Captions -- */}
                     <SubDrawer title="Captions">
@@ -2156,23 +1451,31 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
                     {/* ── Rendering ── */}
                     <SubDrawer title="Rendering">
                         <Slider label="Canvas Width" value={s.canvasWidth} min={200} max={2000} step={50}
-                            onChange={(v) => set({ canvasWidth: v })} displayValue={`${s.canvasWidth}px`} />
+                            onChange={(v) => set({ canvasWidth: v })} displayValue={`${s.canvasWidth}px`}
+                            showInput inputMax={3000} />
                         <Slider label="Canvas Height" value={s.canvasHeight} min={200} max={2000} step={50}
-                            onChange={(v) => set({ canvasHeight: v })} displayValue={`${s.canvasHeight}px`} />
+                            onChange={(v) => set({ canvasHeight: v })} displayValue={`${s.canvasHeight}px`}
+                            showInput inputMax={3000} />
                         <Slider label="Scale" value={s.scale} min={0.1} max={5} step={0.05}
-                            onChange={(v) => set({ scale: v })} displayValue={s.scale.toFixed(2)} />
+                            onChange={(v) => set({ scale: v })} displayValue={s.scale.toFixed(2)}
+                            showInput inputMax={10} />
                         <Slider label="Screen Position X" value={s.positionX} min={0} max={100} step={1}
-                            onChange={(v) => set({ positionX: v })} displayValue={`${s.positionX}%`} />
+                            onChange={(v) => set({ positionX: v })} displayValue={`${s.positionX}%`}
+                            showInput inputMax={100} />
                         <Slider label="Screen Position Y" value={s.positionY} min={0} max={100} step={1}
-                            onChange={(v) => set({ positionY: v })} displayValue={`${s.positionY}%`} />
+                            onChange={(v) => set({ positionY: v })} displayValue={`${s.positionY}%`}
+                            showInput inputMax={100} />
                         <Slider label="Model Anchor X" value={s.modelPositionX} min={0} max={100} step={1}
-                            onChange={(v) => set({ modelPositionX: v })} displayValue={`${s.modelPositionX}%`} />
+                            onChange={(v) => set({ modelPositionX: v })} displayValue={`${s.modelPositionX}%`}
+                            showInput inputMax={100} />
                         <Slider label="Model Anchor Y" value={s.modelPositionY} min={0} max={100} step={1}
-                            onChange={(v) => set({ modelPositionY: v })} displayValue={`${s.modelPositionY}%`} />
+                            onChange={(v) => set({ modelPositionY: v })} displayValue={`${s.modelPositionY}%`}
+                            showInput inputMax={100} />
                         <Slider label="Opacity" value={s.opacity} min={0} max={1} step={0.05}
-                            onChange={(v) => set({ opacity: v })} displayValue={s.opacity.toFixed(2)} />
+                            onChange={(v) => set({ opacity: v })} displayValue={s.opacity.toFixed(2)}
+                            showInput inputMax={1} />
                         <Slider label="Z-Index" value={s.zIndex} min={1} max={9999} step={1}
-                            onChange={(v) => set({ zIndex: v })} />
+                            onChange={(v) => set({ zIndex: v })} showInput inputMax={9999} />
                     </SubDrawer>
 
                     {/* ── Filters ── */}
@@ -2244,7 +1547,13 @@ export default function App({ settings, onChange, sttModel, onLoadSttModel }) {
 
                     {/* ── Motion & Expression Test ── */}
                     <SubDrawer title="Motion & Expression Test">
-                        <MotionTestSection />
+                        <MotionTestSection
+                            defaultStateResetDelayMs={DEFAULT_STATE_RESET_DELAY_MS}
+                            resetDynamicState={resetDynamicState}
+                            stopModelMotionsOnly={stopModelMotionsOnly}
+                            readMotionDurationMs={readMotionDurationMs}
+                            getMotionManager={getMotionManager}
+                        />
                     </SubDrawer>
 
                 </div>
