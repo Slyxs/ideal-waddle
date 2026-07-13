@@ -132,11 +132,15 @@ function parseMotionValue(value) {
     return { groupName, motionIndex };
 }
 
+function readMotionDefinitions(model) {
+    const settings = model?.internalModel?.settings || {};
+    return settings.motions || model?.internalModel?.motionManager?.definitions || {};
+}
+
 function resolveMotionLabel(model, motionValue) {
     const parsedMotion = parseMotionValue(motionValue);
     if (!parsedMotion) return '';
-    const settings = model?.internalModel?.settings || {};
-    const definitions = settings.motions || model?.internalModel?.motionManager?.definitions || {};
+    const definitions = readMotionDefinitions(model);
     const groupMotions = Array.isArray(definitions?.[parsedMotion.groupName]) ? definitions[parsedMotion.groupName] : [];
     const motion = groupMotions[parsedMotion.motionIndex];
     return getMotionLabel(motion, parsedMotion.motionIndex);
@@ -196,7 +200,13 @@ function resolveMappedCue(settings, segment) {
         }
     }
 
-    return { motion, expression };
+    return {
+        motion,
+        expression,
+        emotionMappingFound: !!emotionMapping,
+        actionMappingFound: !!actionMapping,
+        actionsEnabled,
+    };
 }
 
 function getMotionManager(model) {
@@ -226,6 +236,14 @@ function stopModelMotionsOnly(model) {
     try { motionManager?.queueManager?.stopAllMotions?.(); } catch { /* noop */ }
     try { motionManager?.state?.reset?.(); } catch { /* noop */ }
     try { motionManager?.stopSpeaking?.(); } catch { /* noop */ }
+    try { motionManager.playing = false; } catch { /* noop */ }
+}
+
+function stopModelMotionQueuesOnly(model) {
+    const motionManager = getMotionManager(model);
+    try { motionManager?._stopAllMotions?.(); } catch { /* noop */ }
+    try { motionManager?.queueManager?.stopAllMotions?.(); } catch { /* noop */ }
+    try { motionManager?.state?.reset?.(); } catch { /* noop */ }
     try { motionManager.playing = false; } catch { /* noop */ }
 }
 
@@ -275,17 +293,20 @@ async function startMotionWithoutInterruptingAudio(model, parsedMotion, options 
         return false;
     }
 
-    const definitions = motionManager.definitions || {};
+    const definitions = readMotionDefinitions(model);
     const groupMotions = Array.isArray(definitions?.[parsedMotion.groupName]) ? definitions[parsedMotion.groupName] : [];
     if (!groupMotions[parsedMotion.motionIndex]) {
-        console.warn('[Live2D Dynamic] Motion mapping points to an unavailable motion:', parsedMotion);
+        console.warn('[Live2D Dynamic] Motion mapping points to an unavailable motion:', {
+            ...parsedMotion,
+            availableGroups: Object.keys(definitions),
+        });
         return false;
     }
 
     if (!shouldContinue()) return false;
 
     try {
-        stopModelMotionsOnly(model);
+        stopModelMotionQueuesOnly(model);
         if (!shouldContinue()) return false;
         if (typeof motionManager.state?.reserve === 'function') {
             const reserved = motionManager.state.reserve(parsedMotion.groupName, parsedMotion.motionIndex, LIVE2D_MOTION_PRIORITY_FORCE);
@@ -313,7 +334,8 @@ async function startMotionWithoutInterruptingAudio(model, parsedMotion, options 
 async function applyDynamicCue(model, settings, segment, options = {}) {
     if (!model) return null;
     const shouldContinue = typeof options.shouldContinue === 'function' ? options.shouldContinue : () => true;
-    const { motion, expression } = resolveMappedCue(settings, segment);
+    const resolvedCue = resolveMappedCue(settings, segment);
+    const { motion, expression } = resolvedCue;
     const cue = {
         emotion: segment?.emotion || '',
         action: segment?.action || null,
@@ -322,6 +344,9 @@ async function applyDynamicCue(model, settings, segment, options = {}) {
         motionLabel: resolveMotionLabel(model, motion),
         expression,
         expressionLabel: resolveExpressionLabel(model, expression),
+        emotionMappingFound: resolvedCue.emotionMappingFound,
+        actionMappingFound: resolvedCue.actionMappingFound,
+        actionsEnabled: resolvedCue.actionsEnabled,
         appliedMotion: false,
         appliedExpression: false,
     };
@@ -346,6 +371,13 @@ async function applyDynamicCue(model, settings, segment, options = {}) {
     }
 
     return cue;
+}
+
+function describeDynamicCue(cue) {
+    if (!cue) return 'none';
+    const motion = cue.motion ? `${cue.motion}${cue.motionLabel ? ` (${cue.motionLabel})` : ''}` : 'none';
+    const expression = cue.expression ? `${cue.expression}${cue.expressionLabel ? ` (${cue.expressionLabel})` : ''}` : 'none';
+    return `emotion="${cue.emotion || ''}" action="${cue.action || 'none'}" motion=${motion} expression=${expression} appliedMotion=${cue.appliedMotion === true} appliedExpression=${cue.appliedExpression === true}`;
 }
 
 function getSillyTavernContext() {
@@ -1058,13 +1090,31 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                     const durationMs = Math.max(350, Math.round(Math.max(0, (end || 0) - (start || 0)) * 1000));
                     captionControllerRef.current?.start({ text: segment?.text || '', durationMs });
 
-                    applyDynamicCue(model, liveSettings, segment, { shouldContinue: () => !settled })
+                    let cueAllowed = true;
+                    const applyCueForSegment = () => applyDynamicCue(model, liveSettings, segment, { shouldContinue: () => !settled && cueAllowed })
                         .then((cue) => {
-                            if (!settled) console.log('[Live2D+ Dynamic] Applied cue:', { segment, cue });
+                            if (settled || !cueAllowed || !cue) return cue;
+                            if (!cue.motion && !cue.expression) {
+                                console.warn('[Live2D+ Dynamic] No mapped motion/expression for segment:', {
+                                    emotion: cue.emotion,
+                                    action: cue.action,
+                                    emotionMappingFound: cue.emotionMappingFound,
+                                    actionMappingFound: cue.actionMappingFound,
+                                    actionsEnabled: cue.actionsEnabled,
+                                });
+                            }
+                            console.log(`[Live2D+ Dynamic] Cue result: ${describeDynamicCue(cue)}`, cue);
+                            return cue;
                         })
-                        .catch((error) => console.error('[Live2D+ Dynamic] Cue application failed:', error));
+                        .catch((error) => {
+                            console.error('[Live2D+ Dynamic] Cue application failed:', error);
+                            return null;
+                        });
 
-                    if (!url) continue;
+                    if (!url) {
+                        await applyCueForSegment();
+                        continue;
+                    }
 
                     await new Promise((resolveSegment) => {
                         let segmentResolved = false;
@@ -1077,6 +1127,7 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                         const resolveOnce = () => {
                             if (segmentResolved) return;
                             segmentResolved = true;
+                            cueAllowed = false;
                             if (fallbackTimer && typeof window !== 'undefined') window.clearTimeout(fallbackTimer);
                             resolveSegment();
                         };
@@ -1101,7 +1152,9 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                                     if (started === false) {
                                         console.warn(`[Live2D+ Dynamic] Segment ${index + 1} rejected by model.speak.`);
                                         resolveOnce();
+                                        return;
                                     }
+                                    applyCueForSegment();
                                 })
                                 .catch((error) => {
                                     console.error(`[Live2D+ Dynamic] Segment ${index + 1} start failed:`, error);
