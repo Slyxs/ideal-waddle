@@ -65,7 +65,8 @@ import {
 
         function handleChange(patch) {
             setSettings((prev) => {
-                const next = normalizeSettings({ ...prev, ...patch });
+                const resolvedPatch = typeof patch === 'function' ? patch(prev) : patch;
+                const next = normalizeSettings({ ...prev, ...(resolvedPatch || {}) });
                 // Persist to ST's extension settings
                 Object.assign(extensionSettings[SETTINGS_KEY], next);
                 saveSettingsDebounced();
