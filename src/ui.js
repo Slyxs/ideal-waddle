@@ -66,6 +66,26 @@ export const LIVE2D_PLUS_SETTINGS_STYLES = `
     opacity: 0.62;
 }
 
+.live2d-plus-settings .section-details {
+    margin-top: 8px;
+}
+
+.live2d-plus-settings .section-details > summary {
+    cursor: pointer;
+    padding: 4px 0;
+    font-weight: 700;
+    user-select: none;
+}
+
+.live2d-plus-settings .section-details > summary b {
+    font-size: 0.9em;
+}
+
+.live2d-plus-settings .section-details-content {
+    padding-top: 6px;
+    padding-bottom: 2px;
+}
+
 .live2d-plus-settings .mapping-list {
     display: flex;
     flex-direction: column;
@@ -254,17 +274,16 @@ export function ColorInput({ label, value, onChange }) {
     );
 }
 
-export function SubDrawer({ title, children }) {
+export function SubDrawer({ title, children, defaultOpen = false }) {
     return (
-        <div className="inline-drawer" style={{ marginTop: '6px' }}>
-            <div className="inline-drawer-toggle inline-drawer-header" style={{ padding: '4px 0' }}>
-                <b style={{ fontSize: '0.9em' }}>{title}</b>
-                <div className="inline-drawer-icon fa-solid fa-circle-chevron-down down" />
-            </div>
-            <div className="inline-drawer-content" style={{ paddingTop: '6px', paddingBottom: '2px' }}>
+        <details className="section-details" open={defaultOpen || undefined}>
+            <summary>
+                <b>{title}</b>
+            </summary>
+            <div className="section-details-content">
                 {children}
             </div>
-        </div>
+        </details>
     );
 }
 
@@ -610,6 +629,12 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
                     <option value={ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER}>SillyTavern built-in classifier</option>
                 </select>
             </label>
+
+            {isBuiltInClassifier && (
+                <div className="hint">
+                    Built-in classifier mode returns one emotion for the whole TTS text, so Live2D+ plays it as a single segment. Segment splitting and action mappings are only available with the external LLM source.
+                </div>
+            )}
 
             {!isBuiltInClassifier && (
                 <>
