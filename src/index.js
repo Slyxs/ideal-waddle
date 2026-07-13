@@ -64,14 +64,14 @@ import {
         useEffect(() => subscribeSttModelState(setSttModel), []);
 
         function handleChange(patch) {
-            setSettings((prev) => {
-                const resolvedPatch = typeof patch === 'function' ? patch(prev) : patch;
-                const next = normalizeSettings({ ...prev, ...(resolvedPatch || {}) });
-                // Persist to ST's extension settings
-                Object.assign(extensionSettings[SETTINGS_KEY], next);
-                saveSettingsDebounced();
-                return next;
-            });
+            // Merge the patch onto the authoritative settings object (the single
+            // source of truth ST persists), not a render-time React snapshot.
+            // Object.assign is synchronous, so back-to-back calls in the same
+            // tick each build on the previous write instead of clobbering it.
+            const next = normalizeSettings({ ...extensionSettings[SETTINGS_KEY], ...patch });
+            Object.assign(extensionSettings[SETTINGS_KEY], next);
+            saveSettingsDebounced();
+            setSettings(next);
         }
 
         return (

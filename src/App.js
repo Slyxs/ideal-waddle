@@ -159,36 +159,13 @@ function resolveExpressionLabel(model, expressionValue) {
     return getExpressionLabel(expressions[expressionIndex], expressionIndex);
 }
 
-function mappingText(value) {
-    return typeof value === 'string' ? value.trim() : '';
-}
-
-function mergeMappingEntry(target, source, overwrite = false) {
-    const entry = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
-    const motion = mappingText(entry.motion);
-    const expression = mappingText(entry.expression);
-
-    if (motion && (overwrite || !target.motion)) target.motion = motion;
-    if (expression && (overwrite || !target.expression)) target.expression = expression;
-    return target;
-}
-
 function readMappingByLabel(mappings, label) {
     const key = typeof label === 'string' ? label.trim() : '';
     if (!key || !mappings || typeof mappings !== 'object') return null;
-
+    if (mappings[key]) return mappings[key];
     const lowerKey = key.toLowerCase();
-    const matches = Object.entries(mappings).filter(([mappingKey]) => mappingKey.toLowerCase() === lowerKey);
-    if (matches.length === 0) return null;
-
-    const merged = {};
-    const exact = matches.find(([mappingKey]) => mappingKey === key);
-    for (const [mappingKey, mapping] of matches) {
-        if (mappingKey !== key) mergeMappingEntry(merged, mapping);
-    }
-    if (exact) mergeMappingEntry(merged, exact[1], true);
-
-    return merged;
+    const matchedKey = Object.keys(mappings).find((mappingKey) => mappingKey.toLowerCase() === lowerKey);
+    return matchedKey ? mappings[matchedKey] : null;
 }
 
 function resolveMappedCue(settings, segment) {
@@ -229,12 +206,6 @@ function resolveMappedCue(settings, segment) {
         emotionMappingFound: !!emotionMapping,
         actionMappingFound: !!actionMapping,
         actionsEnabled,
-        emotionMapping: emotionMapping || null,
-        actionMapping: actionMapping
-            ? { description: actionMapping.description || '', motion: actionMapping.motion || '', expression: actionMapping.expression || '' }
-            : null,
-        disableSettings: { ...disabled },
-        priorityList: priorityList.map((item) => ({ type: item.type, target: item.target, priority: item.priority })),
     };
 }
 
@@ -1127,13 +1098,9 @@ function Live2DCanvas({ settings, onPositionCommit }) {
                                 console.warn('[Live2D+ Dynamic] No mapped motion/expression for segment:', {
                                     emotion: cue.emotion,
                                     action: cue.action,
-                                    emotionMapping: cue.emotionMapping,
-                                    actionMapping: cue.actionMapping,
                                     emotionMappingFound: cue.emotionMappingFound,
                                     actionMappingFound: cue.actionMappingFound,
                                     actionsEnabled: cue.actionsEnabled,
-                                    disableSettings: cue.disableSettings,
-                                    priorityList: cue.priorityList,
                                 });
                             }
                             console.log(`[Live2D+ Dynamic] Cue result: ${describeDynamicCue(cue)}`, cue);

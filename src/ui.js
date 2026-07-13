@@ -193,10 +193,7 @@ function readLiveModelInfo(readRuntimeModelInfo) {
         return EMPTY_MODEL_INFO;
     }
 
-    const liveInfo = readRuntimeModelInfo(window.live2dPlusModel) || EMPTY_MODEL_INFO;
-    return modelInfoSignature(liveInfo) === modelInfoSignature(EMPTY_MODEL_INFO)
-        ? window.live2dPlusModelInfo || EMPTY_MODEL_INFO
-        : liveInfo;
+    return window.live2dPlusModelInfo || readRuntimeModelInfo(window.live2dPlusModel) || EMPTY_MODEL_INFO;
 }
 
 export function CheckboxRow({ label, checked, onChange }) {
@@ -500,44 +497,13 @@ function MappingSelect({ label, value, options, onChange }) {
     );
 }
 
-function mappingText(value) {
-    return typeof value === 'string' ? value.trim() : '';
-}
-
-function mergeMappingEntry(target, source, overwrite = false) {
-    const entry = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
-    const motion = mappingText(entry.motion);
-    const expression = mappingText(entry.expression);
-
-    if (motion && (overwrite || !target.motion)) target.motion = motion;
-    if (expression && (overwrite || !target.expression)) target.expression = expression;
-    return target;
-}
-
-function findMappingKeyByLabel(mappings, label) {
-    const key = typeof label === 'string' ? label.trim() : '';
-    if (!key || !mappings || typeof mappings !== 'object') return '';
-    if (Object.prototype.hasOwnProperty.call(mappings, key)) return key;
-
-    const lowerKey = key.toLowerCase();
-    return Object.keys(mappings).find((mappingKey) => mappingKey.toLowerCase() === lowerKey) || '';
-}
-
 function readMappingByLabel(mappings, label) {
     const key = typeof label === 'string' ? label.trim() : '';
     if (!key || !mappings || typeof mappings !== 'object') return {};
-
+    if (mappings[key]) return mappings[key];
     const lowerKey = key.toLowerCase();
-    const matches = Object.entries(mappings).filter(([mappingKey]) => mappingKey.toLowerCase() === lowerKey);
-    if (matches.length === 0) return {};
-
-    const merged = {};
-    const exact = matches.find(([mappingKey]) => mappingKey === key);
-    for (const [mappingKey, mapping] of matches) {
-        if (mappingKey !== key) mergeMappingEntry(merged, mapping);
-    }
-    if (exact) mergeMappingEntry(merged, exact[1], true);
-    return merged;
+    const matchedKey = Object.keys(mappings).find((mappingKey) => mappingKey.toLowerCase() === lowerKey);
+    return matchedKey ? mappings[matchedKey] : {};
 }
 
 export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInfo, modelInfoEventName }) {
@@ -568,79 +534,66 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
     }));
     const isBuiltInClassifier = settings.analysisSource === ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER;
     const emotionLabels = isBuiltInClassifier ? BUILTIN_CLASSIFIER_EMOTION_LABELS : settings.emotionLabels;
-    const buildPriorityRows = (sourceSettings) => {
-        const sourcePriorityList = Array.isArray(sourceSettings.priorityList) ? sourceSettings.priorityList : [];
-        const sourceIsBuiltInClassifier = sourceSettings.analysisSource === ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER;
+    const priorityRows = settings.priorityList
+        .map((item, originalIndex) => ({ item, originalIndex }))
+        .filter(({ item }) => !isBuiltInClassifier || item.type !== 'action');
 
-        return sourcePriorityList
-            .map((item, originalIndex) => ({ item, originalIndex }))
-            .filter(({ item }) => !sourceIsBuiltInClassifier || item.type !== 'action');
-    };
-    const priorityRows = buildPriorityRows(settings);
-
-    const update = (patch) => onChange((currentSettings) => {
-        const resolvedPatch = typeof patch === 'function' ? patch(currentSettings || settings) : patch;
-        return {
-            routeTtsToLive2D: true,
-            blockOriginalTtsPlayback: true,
-            ...(resolvedPatch || {}),
-        };
+    // Send only the changed keys. handleChange merges the patch onto the
+    // authoritative settings object, so spreading the whole (render-time)
+    // `settings` snapshot here would revert any field changed since this
+    // render and cause lost updates.
+    const update = (patch) => onChange({
+        routeTtsToLive2D: true,
+        blockOriginalTtsPlayback: true,
+        ...patch,
     });
-    const updateAnalysisSource = (analysisSource) => update((currentSettings) => {
+    const updateAnalysisSource = (analysisSource) => {
         const patch = { analysisSource };
         if (analysisSource === ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER) {
             patch.disableSettings = {
-                ...currentSettings.disableSettings,
+                ...settings.disableSettings,
                 actionMotions: true,
                 actionExpressions: true,
             };
         }
-        return patch;
+        update(patch);
+    };
+    const updateDisable = (key, value) => {
+        if (isBuiltInClassifier && key.startsWith('action')) return;
+        update({ disableSettings: { ...settings.disableSettings, [key]: value } });
+    };
+    const updateEmotionMapping = (emotion, patch) => update({
+        emotionMappings: {
+            ...settings.emotionMappings,
+            [emotion]: { ...(settings.emotionMappings?.[emotion] || {}), ...patch },
+        },
     });
-    const updateDisable = (key, value) => update((currentSettings) => {
-        if (currentSettings.analysisSource === ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER && key.startsWith('action')) {
-            return {};
-        }
-        return { disableSettings: { ...currentSettings.disableSettings, [key]: value } };
-    });
-    const updateEmotionMapping = (emotion, patch) => update((currentSettings) => {
-        const currentMappings = currentSettings.emotionMappings || {};
-        const existingKey = findMappingKeyByLabel(currentMappings, emotion);
-        const previousMapping = existingKey ? currentMappings[existingKey] : {};
-        const nextMappings = { ...currentMappings };
-
-        if (existingKey && existingKey !== emotion) delete nextMappings[existingKey];
-        nextMappings[emotion] = { ...previousMapping, ...patch };
-
-        return { emotionMappings: nextMappings };
-    });
-    const updateActionMapping = (index, patch) => update((currentSettings) => ({
-        actionMappings: currentSettings.actionMappings.map((action, actionIndex) => (
+    const updateActionMapping = (index, patch) => update({
+        actionMappings: settings.actionMappings.map((action, actionIndex) => (
             actionIndex === index ? { ...action, ...patch } : action
         )),
-    }));
-    const movePriority = (index, direction) => update((currentSettings) => {
-        const currentRows = buildPriorityRows(currentSettings);
-        const visibleIndex = currentRows.findIndex((row) => row.originalIndex === index);
-        const targetRow = currentRows[visibleIndex + direction];
-        if (!targetRow) return {};
-        const next = [...currentSettings.priorityList];
-        const target = targetRow.originalIndex;
-        if (target < 0 || target >= next.length) return {};
-        [next[index], next[target]] = [next[target], next[index]];
-        return { priorityList: next.map((item, itemIndex) => ({ ...item, priority: next.length - itemIndex })) };
     });
+    const movePriority = (index, direction) => {
+        const visibleIndex = priorityRows.findIndex((row) => row.originalIndex === index);
+        const targetRow = priorityRows[visibleIndex + direction];
+        if (!targetRow) return;
+        const next = [...settings.priorityList];
+        const target = targetRow.originalIndex;
+        if (target < 0 || target >= next.length) return;
+        [next[index], next[target]] = [next[target], next[index]];
+        update({ priorityList: next.map((item, itemIndex) => ({ ...item, priority: next.length - itemIndex })) });
+    };
 
-    const addActionMapping = () => update((currentSettings) => ({
+    const addActionMapping = () => update({
         actionMappings: [
-            ...currentSettings.actionMappings,
+            ...settings.actionMappings,
             { id: `action-${Date.now()}`, description: '', motion: '', expression: '' },
         ],
-    }));
+    });
 
-    const removeActionMapping = (index) => update((currentSettings) => ({
-        actionMappings: currentSettings.actionMappings.filter((_, actionIndex) => actionIndex !== index),
-    }));
+    const removeActionMapping = (index) => update({
+        actionMappings: settings.actionMappings.filter((_, actionIndex) => actionIndex !== index),
+    });
 
     const fetchModels = async () => {
         if (isBuiltInClassifier) return;
@@ -728,7 +681,7 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
                 </>
             )}
 
-            <div className="section-caption">Enabled cue sources</div>
+            <div className="section-caption">Disable cue sources</div>
             <CheckboxRow label="Emotion motions" checked={!settings.disableSettings.emotionMotions} onChange={(value) => updateDisable('emotionMotions', !value)} />
             <CheckboxRow label="Emotion expressions" checked={!settings.disableSettings.emotionExpressions} onChange={(value) => updateDisable('emotionExpressions', !value)} />
             {!isBuiltInClassifier && (
@@ -854,29 +807,19 @@ export function TapInteractionsSection({ settings, onChange, readRuntimeModelInf
     const defaultMapping = tapInteractions.defaultMapping || {};
     const hitAreaMappings = tapInteractions.hitAreaMappings || {};
 
-    const updateTapInteractions = (patch) => onChange((currentSettings) => {
-        const currentTapInteractions = currentSettings.tapInteractions || {};
-        const resolvedPatch = typeof patch === 'function'
-            ? patch(currentTapInteractions, currentSettings)
-            : patch;
-
-        return {
-            tapInteractions: { ...currentTapInteractions, ...(resolvedPatch || {}) },
-        };
+    const updateTapInteractions = (patch) => onChange({
+        tapInteractions: { ...tapInteractions, ...patch },
     });
-    const updateDefaultMapping = (patch) => updateTapInteractions((currentTapInteractions) => ({
-        defaultMapping: { ...(currentTapInteractions.defaultMapping || {}), ...patch },
-    }));
+    const updateDefaultMapping = (patch) => updateTapInteractions({
+        defaultMapping: { ...defaultMapping, ...patch },
+    });
     const updateHitAreaMapping = (hitArea, patch) => {
-        updateTapInteractions((currentTapInteractions) => {
-            const currentMappings = currentTapInteractions.hitAreaMappings || {};
-            const current = currentMappings[hitArea.id] || currentMappings[hitArea.name] || {};
-            return {
-                hitAreaMappings: {
-                    ...currentMappings,
-                    [hitArea.id]: { ...current, ...patch },
-                },
-            };
+        const current = hitAreaMappings[hitArea.id] || hitAreaMappings[hitArea.name] || {};
+        updateTapInteractions({
+            hitAreaMappings: {
+                ...hitAreaMappings,
+                [hitArea.id]: { ...current, ...patch },
+            },
         });
     };
 
