@@ -2,7 +2,9 @@
 // Extension settings: defaults, normalization, helpers
 // ---------------------------------------------------------------------------
 
-import { DEFAULT_ANALYSIS_MODEL, DEFAULT_EMOTION_LABELS } from './dynamicAnalysis';
+import { ANALYSIS_SOURCES, DEFAULT_ANALYSIS_MODEL, DEFAULT_EMOTION_LABELS } from './dynamicAnalysis';
+
+export { ANALYSIS_SOURCES, BUILTIN_CLASSIFIER_EMOTION_LABELS } from './dynamicAnalysis';
 
 export const SETTINGS_KEY = 'live2dplus';
 
@@ -93,6 +95,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     resetExpressionAfterPlayback: true,
     tapInteractions: DEFAULT_TAP_INTERACTIONS,
     voskModelUrl: '',
+    analysisSource: ANALYSIS_SOURCES.OPENAI,
     analysisBaseUrl: '',
     analysisApiKey: '',
     analysisModel: DEFAULT_ANALYSIS_MODEL,
@@ -154,6 +157,13 @@ function normalizeLabelList(values, fallback = []) {
         labels.push(label);
     }
     return labels.length ? labels : [...fallback];
+}
+
+const VALID_ANALYSIS_SOURCES = new Set(Object.values(ANALYSIS_SOURCES));
+
+function normalizeAnalysisSource(value) {
+    const source = text(value).toLowerCase();
+    return VALID_ANALYSIS_SOURCES.has(source) ? source : ANALYSIS_SOURCES.OPENAI;
 }
 
 function normalizeMappingEntry(value) {
@@ -286,6 +296,8 @@ function normalizeCaptionSettings(source = {}) {
 
 export function normalizeSettings(input = {}) {
     const src = input && typeof input === 'object' ? input : {};
+    const analysisSource = normalizeAnalysisSource(src.analysisSource);
+    const disableSettings = normalizeDisableSettings(src.disableSettings);
     const filters = src.filters && typeof src.filters === 'object' ? src.filters : {};
     const fp = src.filterParams && typeof src.filterParams === 'object' ? src.filterParams : {};
     const outline = fp.outline || {};
@@ -293,6 +305,11 @@ export function normalizeSettings(input = {}) {
     const crt = fp.crt || {};
     const noise = fp.noise || {};
     const alpha = fp.alpha || {};
+
+    if (analysisSource === ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER) {
+        disableSettings.actionMotions = true;
+        disableSettings.actionExpressions = true;
+    }
 
     return {
         enabled: bool(src.enabled, DEFAULT_SETTINGS.enabled),
@@ -306,6 +323,7 @@ export function normalizeSettings(input = {}) {
         resetExpressionAfterPlayback: bool(src.resetExpressionAfterPlayback, DEFAULT_SETTINGS.resetExpressionAfterPlayback),
         tapInteractions: normalizeTapInteractions(src.tapInteractions),
         voskModelUrl: typeof src.voskModelUrl === 'string' ? src.voskModelUrl : '',
+        analysisSource,
         analysisBaseUrl: text(src.analysisBaseUrl),
         analysisApiKey: typeof src.analysisApiKey === 'string' ? src.analysisApiKey : '',
         analysisModel: text(src.analysisModel) || DEFAULT_ANALYSIS_MODEL,
@@ -313,7 +331,7 @@ export function normalizeSettings(input = {}) {
         emotionMappings: normalizeEmotionMappings(src.emotionMappings),
         actionMappings: normalizeActionMappings(src.actionMappings),
         priorityList: normalizePriorityList(src.priorityList),
-        disableSettings: normalizeDisableSettings(src.disableSettings),
+        disableSettings,
         captions: normalizeCaptionSettings(src.captions),
         modelSource: Object.values(MODEL_SOURCES).includes(src.modelSource)
             ? src.modelSource

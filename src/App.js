@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { normalizeSettings, resolveModelUrl, MODEL_SOURCES, CAPTION_STYLE_OPTIONS } from './settings';
+import { ANALYSIS_SOURCES, normalizeSettings, resolveModelUrl, MODEL_SOURCES, CAPTION_STYLE_OPTIONS } from './settings';
 import { EXTENSION_WEB_PATH } from './stt';
 import { loadLive2DRuntime, buildFilters, applyModelTransform, applyModelInteraction, muteModelMotionAudio } from './live2d';
 import { createLive2DCaptionController } from './captions';
@@ -155,11 +155,21 @@ function resolveExpressionLabel(model, expressionValue) {
     return getExpressionLabel(expressions[expressionIndex], expressionIndex);
 }
 
+function readMappingByLabel(mappings, label) {
+    const key = typeof label === 'string' ? label.trim() : '';
+    if (!key || !mappings || typeof mappings !== 'object') return null;
+    if (mappings[key]) return mappings[key];
+    const lowerKey = key.toLowerCase();
+    const matchedKey = Object.keys(mappings).find((mappingKey) => mappingKey.toLowerCase() === lowerKey);
+    return matchedKey ? mappings[matchedKey] : null;
+}
+
 function resolveMappedCue(settings, segment) {
     const emotionKey = typeof segment?.emotion === 'string' ? segment.emotion.trim() : '';
     const actionKey = typeof segment?.action === 'string' ? segment.action.trim() : '';
-    const emotionMapping = emotionKey ? settings.emotionMappings?.[emotionKey] : null;
-    const actionMapping = actionKey && Array.isArray(settings.actionMappings)
+    const emotionMapping = readMappingByLabel(settings.emotionMappings, emotionKey);
+    const actionsEnabled = settings.analysisSource !== ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER;
+    const actionMapping = actionsEnabled && actionKey && Array.isArray(settings.actionMappings)
         ? settings.actionMappings.find((action) => action.description === actionKey)
         : null;
     const disabled = settings.disableSettings || {};
@@ -168,7 +178,7 @@ function resolveMappedCue(settings, segment) {
     let expression = '';
 
     for (const item of priorityList.slice().sort((left, right) => right.priority - left.priority)) {
-        if (item.type === 'action' && item.target === 'motion' && !motion && !disabled.actionMotions) {
+        if (actionsEnabled && item.type === 'action' && item.target === 'motion' && !motion && !disabled.actionMotions) {
             const candidate = actionMapping?.motion || '';
             if (candidate && candidate !== 'null') motion = candidate;
         }
@@ -180,7 +190,7 @@ function resolveMappedCue(settings, segment) {
             const candidate = emotionMapping?.motion || '';
             if (candidate && candidate !== 'null') motion = candidate;
         }
-        if (item.type === 'action' && item.target === 'expression' && !expression && !disabled.actionExpressions) {
+        if (actionsEnabled && item.type === 'action' && item.target === 'expression' && !expression && !disabled.actionExpressions) {
             const candidate = actionMapping?.expression || '';
             if (candidate) expression = candidate;
         }

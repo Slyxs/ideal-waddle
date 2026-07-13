@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { fetchOpenAiModels } from './dynamicAnalysis';
+import { ANALYSIS_SOURCES, BUILTIN_CLASSIFIER_EMOTION_LABELS, fetchOpenAiModels } from './dynamicAnalysis';
 
 export const LIVE2D_PLUS_SETTINGS_STYLES = `
 .live2d-plus-settings .field,
@@ -478,6 +478,15 @@ function MappingSelect({ label, value, options, onChange }) {
     );
 }
 
+function readMappingByLabel(mappings, label) {
+    const key = typeof label === 'string' ? label.trim() : '';
+    if (!key || !mappings || typeof mappings !== 'object') return {};
+    if (mappings[key]) return mappings[key];
+    const lowerKey = key.toLowerCase();
+    const matchedKey = Object.keys(mappings).find((mappingKey) => mappingKey.toLowerCase() === lowerKey);
+    return matchedKey ? mappings[matchedKey] : {};
+}
+
 export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInfo, modelInfoEventName }) {
     const [modelInfo, setModelInfo] = useState(() => readLiveModelInfo(readRuntimeModelInfo));
     const [availableModels, setAvailableModels] = useState([]);
@@ -504,6 +513,11 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
         value: String(index),
         label: getExpressionLabel(expression, index),
     }));
+    const isBuiltInClassifier = settings.analysisSource === ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER;
+    const emotionLabels = isBuiltInClassifier ? BUILTIN_CLASSIFIER_EMOTION_LABELS : settings.emotionLabels;
+    const priorityRows = settings.priorityList
+        .map((item, originalIndex) => ({ item, originalIndex }))
+        .filter(({ item }) => !isBuiltInClassifier || item.type !== 'action');
 
     const update = (patch) => onChange({
         ...settings,
@@ -511,7 +525,21 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
         blockOriginalTtsPlayback: true,
         ...patch,
     });
-    const updateDisable = (key, value) => update({ disableSettings: { ...settings.disableSettings, [key]: value } });
+    const updateAnalysisSource = (analysisSource) => {
+        const patch = { analysisSource };
+        if (analysisSource === ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER) {
+            patch.disableSettings = {
+                ...settings.disableSettings,
+                actionMotions: true,
+                actionExpressions: true,
+            };
+        }
+        update(patch);
+    };
+    const updateDisable = (key, value) => {
+        if (isBuiltInClassifier && key.startsWith('action')) return;
+        update({ disableSettings: { ...settings.disableSettings, [key]: value } });
+    };
     const updateEmotionMapping = (emotion, patch) => update({
         emotionMappings: {
             ...settings.emotionMappings,
@@ -524,8 +552,11 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
         )),
     });
     const movePriority = (index, direction) => {
+        const visibleIndex = priorityRows.findIndex((row) => row.originalIndex === index);
+        const targetRow = priorityRows[visibleIndex + direction];
+        if (!targetRow) return;
         const next = [...settings.priorityList];
-        const target = index + direction;
+        const target = targetRow.originalIndex;
         if (target < 0 || target >= next.length) return;
         [next[index], next[target]] = [next[target], next[index]];
         update({ priorityList: next.map((item, itemIndex) => ({ ...item, priority: next.length - itemIndex })) });
@@ -543,6 +574,7 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
     });
 
     const fetchModels = async () => {
+        if (isBuiltInClassifier) return;
         setModelFetchState({ loading: true, message: 'Fetching models...' });
         try {
             const models = await fetchOpenAiModels({ baseUrl: settings.analysisBaseUrl, apiKey: settings.analysisApiKey });
@@ -557,7 +589,7 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
     return (
         <SubDrawer title="Dynamic Analysis" defaultOpen={false}>
             <CheckboxRow
-                label="Dynamic emotion/action mode"
+                label="Dynamic cue mode"
                 checked={settings.dynamicMode}
                 onChange={(value) => update({ dynamicMode: value })}
             />
@@ -568,57 +600,77 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
             />
 
             <label className="field">
-                <span>OpenAI-compatible URL</span>
-                <input
-                    className="text_pole"
-                    type="url"
-                    value={settings.analysisBaseUrl}
-                    onChange={(event) => update({ analysisBaseUrl: event.target.value })}
-                    placeholder="https://proxy.example.com/v1"
-                />
-            </label>
-            <label className="field">
-                <span>API key</span>
-                <input
-                    className="text_pole"
-                    type="password"
-                    value={settings.analysisApiKey}
-                    onChange={(event) => update({ analysisApiKey: event.target.value })}
-                    placeholder="Optional bearer token"
-                />
-            </label>
-            <button className="menu_button full-width-action" type="button" onClick={fetchModels} disabled={modelFetchState.loading}>
-                {modelFetchState.loading ? 'Fetching...' : 'Fetch Models'}
-            </button>
-            {modelFetchState.message && <div className="hint">{modelFetchState.message}</div>}
-            <label className="field">
-                <span>Analysis model</span>
+                <span>Analysis source</span>
                 <select
                     className="text_pole"
-                    value={settings.analysisModel}
-                    onChange={(event) => update({ analysisModel: event.target.value })}
+                    value={settings.analysisSource}
+                    onChange={(event) => updateAnalysisSource(event.target.value)}
                 >
-                    <option value={settings.analysisModel}>{settings.analysisModel || 'Select a model'}</option>
-                    {availableModels.map((model) => (
-                        <option key={model.id} value={model.id}>{model.name || model.id}</option>
-                    ))}
+                    <option value={ANALYSIS_SOURCES.OPENAI}>External LLM (OpenAI-compatible)</option>
+                    <option value={ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER}>SillyTavern built-in classifier</option>
                 </select>
             </label>
+
+            {!isBuiltInClassifier && (
+                <>
+                    <label className="field">
+                        <span>OpenAI-compatible URL</span>
+                        <input
+                            className="text_pole"
+                            type="url"
+                            value={settings.analysisBaseUrl}
+                            onChange={(event) => update({ analysisBaseUrl: event.target.value })}
+                            placeholder="https://proxy.example.com/v1"
+                        />
+                    </label>
+                    <label className="field">
+                        <span>API key</span>
+                        <input
+                            className="text_pole"
+                            type="password"
+                            value={settings.analysisApiKey}
+                            onChange={(event) => update({ analysisApiKey: event.target.value })}
+                            placeholder="Optional bearer token"
+                        />
+                    </label>
+                    <button className="menu_button full-width-action" type="button" onClick={fetchModels} disabled={modelFetchState.loading}>
+                        {modelFetchState.loading ? 'Fetching...' : 'Fetch Models'}
+                    </button>
+                    {modelFetchState.message && <div className="hint">{modelFetchState.message}</div>}
+                    <label className="field">
+                        <span>Analysis model</span>
+                        <select
+                            className="text_pole"
+                            value={settings.analysisModel}
+                            onChange={(event) => update({ analysisModel: event.target.value })}
+                        >
+                            <option value={settings.analysisModel}>{settings.analysisModel || 'Select a model'}</option>
+                            {availableModels.map((model) => (
+                                <option key={model.id} value={model.id}>{model.name || model.id}</option>
+                            ))}
+                        </select>
+                    </label>
+                </>
+            )}
 
             <div className="section-caption">Disable cue sources</div>
             <CheckboxRow label="Emotion motions" checked={!settings.disableSettings.emotionMotions} onChange={(value) => updateDisable('emotionMotions', !value)} />
             <CheckboxRow label="Emotion expressions" checked={!settings.disableSettings.emotionExpressions} onChange={(value) => updateDisable('emotionExpressions', !value)} />
-            <CheckboxRow label="Action motions" checked={!settings.disableSettings.actionMotions} onChange={(value) => updateDisable('actionMotions', !value)} />
-            <CheckboxRow label="Action expressions" checked={!settings.disableSettings.actionExpressions} onChange={(value) => updateDisable('actionExpressions', !value)} />
+            {!isBuiltInClassifier && (
+                <>
+                    <CheckboxRow label="Action motions" checked={!settings.disableSettings.actionMotions} onChange={(value) => updateDisable('actionMotions', !value)} />
+                    <CheckboxRow label="Action expressions" checked={!settings.disableSettings.actionExpressions} onChange={(value) => updateDisable('actionExpressions', !value)} />
+                </>
+            )}
 
             <div className="section-caption">Priority</div>
             <div className="mapping-list compact">
-                {settings.priorityList.map((item, index) => (
+                {priorityRows.map(({ item, originalIndex }, visibleIndex) => (
                     <div className="mapping-row priority-row" key={`${item.type}-${item.target}`}>
                         <span>{item.label}</span>
                         <div className="row-actions">
-                            <button className="menu_button" type="button" onClick={() => movePriority(index, -1)} disabled={index === 0}>Up</button>
-                            <button className="menu_button" type="button" onClick={() => movePriority(index, 1)} disabled={index === settings.priorityList.length - 1}>Down</button>
+                            <button className="menu_button" type="button" onClick={() => movePriority(originalIndex, -1)} disabled={visibleIndex === 0}>Up</button>
+                            <button className="menu_button" type="button" onClick={() => movePriority(originalIndex, 1)} disabled={visibleIndex === priorityRows.length - 1}>Down</button>
                         </div>
                     </div>
                 ))}
@@ -626,8 +678,8 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
 
             <div className="section-caption">Emotion mappings</div>
             <div className="mapping-list">
-                {settings.emotionLabels.map((emotion) => {
-                    const mapping = settings.emotionMappings?.[emotion] || {};
+                {emotionLabels.map((emotion) => {
+                    const mapping = readMappingByLabel(settings.emotionMappings, emotion);
                     return (
                         <div className="mapping-row" key={emotion}>
                             <strong>{emotion}</strong>
@@ -638,27 +690,31 @@ export function DynamicSettingsSection({ settings, onChange, readRuntimeModelInf
                 })}
             </div>
 
-            <div className="section-caption">Action mappings</div>
-            <div className="mapping-list">
-                {settings.actionMappings.map((action, index) => (
-                    <div className="mapping-row" key={action.id || index}>
-                        <label className="field compact-field">
-                            <span>Action</span>
-                            <input
-                                className="text_pole"
-                                type="text"
-                                value={action.description || ''}
-                                onChange={(event) => updateActionMapping(index, { description: event.target.value })}
-                                placeholder="laughs, sighs, waves..."
-                            />
-                        </label>
-                        <MappingSelect label="Motion" value={action.motion} options={motionOptions} onChange={(value) => updateActionMapping(index, { motion: value })} />
-                        <MappingSelect label="Expression" value={action.expression} options={expressionOptions} onChange={(value) => updateActionMapping(index, { expression: value })} />
-                        <button className="menu_button" type="button" onClick={() => removeActionMapping(index)}>Remove</button>
+            {!isBuiltInClassifier && (
+                <>
+                    <div className="section-caption">Action mappings</div>
+                    <div className="mapping-list">
+                        {settings.actionMappings.map((action, index) => (
+                            <div className="mapping-row" key={action.id || index}>
+                                <label className="field compact-field">
+                                    <span>Action</span>
+                                    <input
+                                        className="text_pole"
+                                        type="text"
+                                        value={action.description || ''}
+                                        onChange={(event) => updateActionMapping(index, { description: event.target.value })}
+                                        placeholder="laughs, sighs, waves..."
+                                    />
+                                </label>
+                                <MappingSelect label="Motion" value={action.motion} options={motionOptions} onChange={(value) => updateActionMapping(index, { motion: value })} />
+                                <MappingSelect label="Expression" value={action.expression} options={expressionOptions} onChange={(value) => updateActionMapping(index, { expression: value })} />
+                                <button className="menu_button" type="button" onClick={() => removeActionMapping(index)}>Remove</button>
+                            </div>
+                        ))}
                     </div>
-                ))}
-            </div>
-            <button className="menu_button full-width-action" type="button" onClick={addActionMapping}>Add Action</button>
+                    <button className="menu_button full-width-action" type="button" onClick={addActionMapping}>Add Action</button>
+                </>
+            )}
         </SubDrawer>
     );
 }

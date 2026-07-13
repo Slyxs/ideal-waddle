@@ -3,6 +3,42 @@ const ANALYSIS_MAX_TOKENS = 1800;
 
 export const DEFAULT_ANALYSIS_MODEL = 'gpt-4o-mini';
 
+export const ANALYSIS_SOURCES = Object.freeze({
+    OPENAI: 'openai-compatible',
+    SILLYTAVERN_CLASSIFIER: 'sillytavern-classifier',
+});
+
+export const BUILTIN_CLASSIFIER_EMOTION_LABELS = Object.freeze([
+    'admiration',
+    'amusement',
+    'anger',
+    'annoyance',
+    'approval',
+    'caring',
+    'confusion',
+    'curiosity',
+    'desire',
+    'disappointment',
+    'disapproval',
+    'disgust',
+    'embarrassment',
+    'excitement',
+    'fear',
+    'gratitude',
+    'grief',
+    'joy',
+    'love',
+    'nervousness',
+    'optimism',
+    'pride',
+    'realization',
+    'relief',
+    'remorse',
+    'sadness',
+    'surprise',
+    'neutral',
+]);
+
 export const DEFAULT_EMOTION_LABELS = Object.freeze([
     'Admiration',
     'Amusement',
@@ -37,6 +73,13 @@ function normalizeText(value) {
     return typeof value === 'string' ? value.trim() : '';
 }
 
+function normalizeAnalysisSource(source) {
+    const normalized = normalizeText(source).toLowerCase();
+    return Object.values(ANALYSIS_SOURCES).includes(normalized)
+        ? normalized
+        : ANALYSIS_SOURCES.OPENAI;
+}
+
 function normalizeUrl(baseUrl) {
     let url = normalizeText(baseUrl).replace(/\/+$/, '');
     if (url.endsWith('/chat/completions')) url = url.slice(0, -'/chat/completions'.length);
@@ -59,9 +102,84 @@ function readNeutralEmotion(emotions = []) {
     return emotions.find((emotion) => String(emotion).toLowerCase() === 'neutral') || emotions[0] || 'Neutral';
 }
 
+function canonicalEmotionLabel(label, emotions = []) {
+    const normalized = normalizeText(label).toLowerCase();
+    const matches = new Map(emotions.map((emotion) => [String(emotion).toLowerCase(), emotion]));
+    return matches.get(normalized) || readNeutralEmotion(emotions);
+}
+
 export function createNeutralDynamicSegments(text, settings = {}) {
     const emotions = Array.isArray(settings.emotionLabels) ? settings.emotionLabels : DEFAULT_EMOTION_LABELS;
     return [{ emotion: readNeutralEmotion(emotions), action: null, text: typeof text === 'string' ? text : '' }];
+}
+
+function trimToEndSentence(input) {
+    if (!input) return '';
+
+    const punctuation = new Set(['.', '!', '?', '*', '"', ')', '}', '`', ']', '$', '。', '！', '？', '”', '）', '】', '’', '」', '_']);
+    const characters = Array.from(input);
+    let last = -1;
+
+    for (let i = characters.length - 1; i >= 0; i -= 1) {
+        const character = characters[i];
+        if (!punctuation.has(character)) continue;
+        last = i > 0 && /[\s\n]/.test(characters[i - 1]) ? i - 1 : i;
+        break;
+    }
+
+    return last === -1
+        ? input.trimEnd()
+        : characters.slice(0, last + 1).join('').trimEnd();
+}
+
+function trimToStartSentence(input) {
+    if (!input) return '';
+
+    const positions = ['.', '!', '?', '\n']
+        .map((punctuation) => ({ punctuation, index: input.indexOf(punctuation) }))
+        .filter(({ index }) => index > 0)
+        .sort((left, right) => left.index - right.index);
+    const first = positions[0];
+    if (!first) return input;
+    return input.substring(first.index + (first.punctuation === '\n' ? 1 : 2));
+}
+
+function sampleClassifierText(text) {
+    if (!text) return text;
+
+    let result = String(text).replace(/[*"]/g, '');
+    const sampleThreshold = 500;
+    const halfSampleThreshold = sampleThreshold / 2;
+
+    if (text.length < sampleThreshold) {
+        result = trimToEndSentence(result);
+    } else {
+        result = `${trimToEndSentence(result.slice(0, halfSampleThreshold))} ${trimToStartSentence(result.slice(-halfSampleThreshold))}`;
+    }
+
+    return result.trim();
+}
+
+function readSillyTavernContext() {
+    return typeof globalThis !== 'undefined' && typeof globalThis.SillyTavern?.getContext === 'function'
+        ? globalThis.SillyTavern.getContext()
+        : null;
+}
+
+function readSillyTavernRequestHeaders(options) {
+    const context = readSillyTavernContext();
+    if (typeof context?.getRequestHeaders === 'function') return context.getRequestHeaders(options);
+    return options?.omitContentType ? {} : { 'Content-Type': 'application/json' };
+}
+
+function readClassifierLabel(payload) {
+    const source = Array.isArray(payload?.classification)
+        ? payload.classification
+        : Array.isArray(payload)
+            ? payload
+            : [];
+    const first = source[0];
+    return normalizeText(first?.label || first?.Label || first?.className || first);
 }
 
 function readDynamicActionDescriptions(settings = {}) {
@@ -190,8 +308,54 @@ export async function fetchOpenAiModels({ baseUrl, apiKey } = {}) {
         .filter(Boolean);
 }
 
+async function analyzeWithSillyTavernClassifier(sourceText) {
+    const emotions = BUILTIN_CLASSIFIER_EMOTION_LABELS;
+
+    if (!sourceText.trim()) {
+        return { segments: createNeutralDynamicSegments(sourceText, { emotionLabels: emotions }), skipped: true };
+    }
+
+    const classifierText = sampleClassifierText(sourceText);
+    console.log('[Live2D Dynamic] SillyTavern classifier request:', { text: classifierText, emotions });
+
+    try {
+        const response = await fetch('/api/extra/classify', {
+            method: 'POST',
+            headers: readSillyTavernRequestHeaders(),
+            body: JSON.stringify({ text: classifierText }),
+        });
+        if (!response.ok) throw new Error(`SillyTavern classifier request failed (${response.status}).`);
+        const payload = await response.json();
+        const rawLabel = readClassifierLabel(payload);
+        const emotion = canonicalEmotionLabel(rawLabel, emotions);
+        const segments = [{ emotion, action: null, text: sourceText }];
+        console.log('[Live2D Dynamic] SillyTavern classifier response:', { rawLabel, payload, segments });
+        return {
+            model: 'sillytavern-classifier',
+            source: { type: ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER, endpoint: '/api/extra/classify' },
+            rawResponseText: rawLabel,
+            parsed: payload,
+            segments,
+        };
+    } catch (error) {
+        console.warn('[Live2D Dynamic] SillyTavern classifier failed; using neutral fallback:', error?.message || error);
+        return {
+            model: 'sillytavern-classifier',
+            source: { type: ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER, endpoint: '/api/extra/classify' },
+            error: error?.message || 'classifier_failed',
+            segments: createNeutralDynamicSegments(sourceText, { emotionLabels: emotions }),
+        };
+    }
+}
+
 export async function analyzeDynamicText(text, settings = {}) {
     const sourceText = typeof text === 'string' ? text : '';
+    const analysisSource = normalizeAnalysisSource(settings.analysisSource);
+
+    if (analysisSource === ANALYSIS_SOURCES.SILLYTAVERN_CLASSIFIER) {
+        return analyzeWithSillyTavernClassifier(sourceText);
+    }
+
     const emotions = Array.isArray(settings.emotionLabels) && settings.emotionLabels.length
         ? settings.emotionLabels
         : DEFAULT_EMOTION_LABELS;
